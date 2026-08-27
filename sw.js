@@ -1,11 +1,11 @@
 /**
- * Service Worker — app-shell offline pour SDF 2026.
- * Les PDF importés vivent dans IndexedDB (pas ici) : ce SW ne fait que
- * garantir que l'app elle-même (HTML/CSS/JS/icônes/polices) s'ouvre
- * sans connexion une fois installée.
+ * Service Worker — app-shell offline pour Voyag'heure.
+ * Les voyages/entrées et les PDF importés vivent dans IndexedDB (pas ici) :
+ * ce SW garantit seulement que l'app elle-même (HTML/CSS/JS/pdf.js/icônes/
+ * polices) s'ouvre sans connexion une fois installée.
  */
-const SHELL_CACHE = 'sdf2026-shell-v1';
-const FONT_CACHE = 'sdf2026-fonts-v1';
+const SHELL_CACHE = 'voyagheure-shell-v2';
+const FONT_CACHE = 'voyagheure-fonts-v1';
 const CURRENT_CACHES = [SHELL_CACHE, FONT_CACHE];
 
 const SHELL_FILES = [
@@ -13,9 +13,11 @@ const SHELL_FILES = [
   './index.html',
   './css/style.css',
   './js/db.js',
-  './js/data.js',
+  './js/parser.js',
   './js/app.js',
   './manifest.json',
+  './vendor/pdfjs/pdf.min.mjs',
+  './vendor/pdfjs/pdf.worker.min.mjs',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-192-maskable.png',

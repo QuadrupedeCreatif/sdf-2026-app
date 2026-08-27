@@ -6,6 +6,13 @@
   --rose: #e85d86;
   --cream: #fbeee4;
   --ok: #6bcf9f;
+
+  /* Codes couleur par type d'entrée — dans la famille chaude de la palette */
+  --type-transport: #f2895a; /* corail */
+  --type-event: #e85d86; /* rose */
+  --type-lodging: #f2b25a; /* ambre */
+  --type-other: #c98bab; /* mauve poussiéreux */
+
   --font-display: 'Archivo Black', 'Arial Black', 'Helvetica Neue', sans-serif;
   --font-body: 'Space Grotesk', 'Segoe UI', system-ui, -apple-system, sans-serif;
   --gradient-accent: linear-gradient(135deg, var(--corail), var(--rose));
@@ -15,6 +22,13 @@
 
 * {
   box-sizing: border-box;
+}
+
+/* Garantit que [hidden] gagne toujours, même face à des règles de
+   composants (ex. .btn) qui posent leur propre `display` avec la même
+   spécificité — sans ça, un <button class="btn" hidden> reste visible. */
+[hidden] {
+  display: none !important;
 }
 
 html,
@@ -67,6 +81,11 @@ body {
   color: transparent;
 }
 
+.app-title--trip {
+  font-size: 22px;
+  margin-top: 8px;
+}
+
 .app-subtitle {
   margin: 6px 0 0;
   font-size: 13px;
@@ -87,7 +106,23 @@ body {
   white-space: nowrap;
 }
 
-/* ---------- Install banner ---------- */
+.icon-btn {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid rgba(242, 137, 90, 0.3);
+  background: rgba(242, 137, 90, 0.1);
+  color: var(--cream);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---------- Install banner / import status ---------- */
 .install-banner {
   margin: 12px 16px 0;
   padding: 12px 14px;
@@ -101,13 +136,26 @@ body {
   text-align: left;
 }
 
-/* ---------- Main / tabs ---------- */
+.import-status {
+  margin: 12px 16px 0;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: rgba(242, 137, 90, 0.1);
+  border: 1px solid rgba(242, 137, 90, 0.25);
+  color: var(--corail);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+}
+
+/* ---------- Main / vues ---------- */
 .app-main {
   flex: 1;
   padding: 18px 16px calc(90px + var(--safe-bottom));
   overflow-y: auto;
 }
 
+.view[hidden],
 .tab-panel[hidden] {
   display: none;
 }
@@ -165,7 +213,116 @@ body {
   padding: 10px 14px;
 }
 
-/* ---------- Documents ---------- */
+.btn--danger {
+  background: transparent;
+  color: var(--rose);
+  border: 1.5px solid rgba(232, 93, 134, 0.35);
+  width: 100%;
+  font-size: 13px;
+  padding: 10px 14px;
+}
+
+.entry-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+/* ---------- Écran d'accueil : liste des voyages ---------- */
+.trip-list {
+  list-style: none;
+  margin: 18px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.trip-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--aubergine-light);
+  border: 1px solid rgba(242, 137, 90, 0.15);
+  border-radius: 16px;
+  padding: 14px;
+  width: 100%;
+}
+
+.trip-card__open {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.trip-card__icon {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 13px;
+  background: var(--gradient-accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+}
+
+.trip-card__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.trip-card__name {
+  font-family: var(--font-display);
+  font-size: 15px;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trip-card__meta {
+  font-size: 12px;
+  color: rgba(251, 238, 228, 0.6);
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trip-card__count {
+  font-size: 11px;
+  color: var(--corail);
+  font-weight: 700;
+  margin-top: 4px;
+}
+
+.trip-card__delete {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(232, 93, 134, 0.12);
+  color: var(--rose);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* ---------- Entrées (billets/transport/hébergement/autre) ---------- */
 .doc-list {
   list-style: none;
   margin: 18px 0 0;
@@ -178,15 +335,21 @@ body {
 .doc-card {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   background: var(--aubergine-light);
   border: 1px solid rgba(242, 137, 90, 0.15);
+  border-left: 3px solid var(--type-other);
   border-radius: 16px;
   padding: 12px;
   text-align: left;
   width: 100%;
   color: inherit;
 }
+
+.doc-card.type-transport { border-left-color: var(--type-transport); }
+.doc-card.type-event { border-left-color: var(--type-event); }
+.doc-card.type-lodging { border-left-color: var(--type-lodging); }
+.doc-card.type-other { border-left-color: var(--type-other); }
 
 .doc-card__icon {
   flex: none;
@@ -217,6 +380,7 @@ body {
   font-size: 12px;
   color: rgba(251, 238, 228, 0.55);
   margin-top: 2px;
+  line-height: 1.4;
 }
 
 .doc-card__open {
@@ -234,17 +398,26 @@ body {
   cursor: pointer;
 }
 
+.doc-card__edit,
 .doc-card__delete {
   flex: none;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   border: none;
-  background: rgba(232, 93, 134, 0.12);
-  color: var(--rose);
-  font-size: 15px;
+  font-size: 13px;
   line-height: 1;
   cursor: pointer;
+}
+
+.doc-card__edit {
+  background: rgba(242, 137, 90, 0.12);
+  color: var(--corail);
+}
+
+.doc-card__delete {
+  background: rgba(232, 93, 134, 0.12);
+  color: var(--rose);
 }
 
 .empty-state {
@@ -296,6 +469,12 @@ body {
   display: flex;
   gap: 10px;
   align-items: flex-start;
+  width: 100%;
+  border: none;
+  text-align: left;
+  color: inherit;
+  font-family: inherit;
+  cursor: pointer;
 }
 
 .timeline-item::before {
@@ -306,9 +485,14 @@ body {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--rose);
+  background: var(--type-other);
   box-shadow: 0 0 0 3px var(--aubergine);
 }
+
+.timeline-item.type-transport::before { background: var(--type-transport); }
+.timeline-item.type-event::before { background: var(--type-event); }
+.timeline-item.type-lodging::before { background: var(--type-lodging); }
+.timeline-item.type-other::before { background: var(--type-other); }
 
 .timeline-item__icon {
   font-size: 18px;
@@ -320,10 +504,15 @@ body {
   font-size: 10.5px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  color: var(--rose);
+  color: var(--type-other);
   font-weight: 700;
   margin: 0 0 2px;
 }
+
+.timeline-item.type-transport .timeline-item__type { color: var(--type-transport); }
+.timeline-item.type-event .timeline-item__type { color: var(--type-event); }
+.timeline-item.type-lodging .timeline-item__type { color: var(--type-lodging); }
+.timeline-item.type-other .timeline-item__type { color: var(--type-other); }
 
 .timeline-item__title {
   font-weight: 600;
@@ -404,71 +593,46 @@ body {
   gap: 8px;
 }
 
-.budget-row {
+.budget-row__open {
   display: flex;
   align-items: center;
   gap: 10px;
   background: var(--aubergine-light);
+  border: none;
+  border-left: 3px solid var(--type-other);
   border-radius: 12px;
-  padding: 8px 10px;
+  padding: 10px 12px;
+  width: 100%;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  font-family: inherit;
+}
+
+.budget-row__open.type-transport { border-left-color: var(--type-transport); }
+.budget-row__open.type-event { border-left-color: var(--type-event); }
+.budget-row__open.type-lodging { border-left-color: var(--type-lodging); }
+.budget-row__open.type-other { border-left-color: var(--type-other); }
+
+.budget-row__icon {
+  flex: none;
+  font-size: 16px;
 }
 
 .budget-row__label {
   flex: 1;
   min-width: 0;
-  border: none;
-  background: transparent;
-  color: var(--cream);
-  font-family: var(--font-body);
   font-weight: 500;
   font-size: 13px;
-  padding: 4px 0;
-}
-
-.budget-row__label:focus {
-  outline: none;
-}
-
-.budget-row__amount-wrap {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  background: var(--aubergine);
-  border-radius: 8px;
-  padding: 4px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .budget-row__amount {
-  width: 56px;
-  border: none;
-  background: transparent;
-  color: var(--cream);
-  font-family: var(--font-body);
+  flex: none;
   font-weight: 700;
   font-size: 13px;
-  text-align: right;
-}
-
-.budget-row__amount:focus {
-  outline: none;
-}
-
-.budget-row__currency {
-  font-size: 12px;
-  color: rgba(251, 238, 228, 0.5);
-}
-
-.budget-row__delete {
-  flex: none;
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  border: none;
-  background: transparent;
-  color: rgba(251, 238, 228, 0.35);
-  font-size: 13px;
-  cursor: pointer;
 }
 
 /* ---------- Tab bar ---------- */
@@ -510,6 +674,113 @@ body {
 .tab-bar__btn.is-active {
   color: var(--corail);
   background: rgba(242, 137, 90, 0.1);
+}
+
+/* ---------- Modales (nouveau voyage / entrée) ---------- */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(10, 5, 12, 0);
+  transition: background 0.15s ease;
+}
+
+.modal.is-open {
+  background: rgba(10, 5, 12, 0.6);
+}
+
+.modal[hidden] {
+  display: none;
+}
+
+.modal__sheet {
+  width: 100%;
+  max-width: 420px;
+  max-height: 88dvh;
+  overflow-y: auto;
+  background: var(--aubergine-light);
+  border-radius: 22px 22px 0 0;
+  padding: 20px 18px calc(22px + var(--safe-bottom));
+  transform: translateY(16px);
+  opacity: 0;
+  transition: transform 0.18s ease, opacity 0.18s ease;
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.4);
+}
+
+.modal.is-open .modal__sheet {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+.modal__title {
+  font-family: var(--font-display);
+  font-size: 18px;
+  margin: 0 0 4px;
+  letter-spacing: 0.2px;
+}
+
+.modal__hint {
+  font-size: 12.5px;
+  color: rgba(251, 238, 228, 0.55);
+  margin: 0 0 14px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 12px;
+  font-size: 12.5px;
+  color: rgba(251, 238, 228, 0.7);
+  font-weight: 600;
+}
+
+.field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.field input,
+.field select {
+  font-family: var(--font-body);
+  font-size: 14.5px;
+  font-weight: 500;
+  color: var(--cream);
+  background: var(--aubergine);
+  border: 1px solid rgba(242, 137, 90, 0.25);
+  border-radius: 11px;
+  padding: 11px 12px;
+  width: 100%;
+  color-scheme: dark;
+}
+
+.field input:focus,
+.field select:focus {
+  outline: none;
+  border-color: var(--corail);
+}
+
+.modal__actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.modal__actions .btn {
+  flex: 1;
+  width: auto;
+}
+
+.modal__actions--wrap {
+  flex-wrap: wrap;
+}
+
+.modal__actions--wrap .btn {
+  flex: 1 1 45%;
 }
 
 /* ---------- Scrollbar (léger, esthétique) ---------- */

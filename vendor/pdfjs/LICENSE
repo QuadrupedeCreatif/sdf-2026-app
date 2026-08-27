@@ -1,0 +1,10 @@
+pdf.js (pdfjs-dist) — vendored build, version 4.9.155
+https://github.com/mozilla/pdf.js
+
+Licensed under the Apache License, Version 2.0.
+http://www.apache.org/licenses/LICENSE-2.0
+
+Files in this directory (pdf.min.mjs, pdf.worker.min.mjs) are the
+unmodified "legacy" build output published by Mozilla to npm as
+`pdfjs-dist`, vendored here so Voyag'heure works fully offline without
+depending on a CDN.

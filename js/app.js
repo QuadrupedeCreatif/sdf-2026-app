@@ -1,297 +1,509 @@
+import { VoyagheureDB } from './db.js';
+import { VoyagheureParser } from './parser.js';
+
 (() => {
   'use strict';
 
+  const $ = (sel) => document.querySelector(sel);
+  const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
   const state = {
-    data: SDFData.load(),
+    view: 'home', // 'home' | 'trip'
+    currentTrip: null,
     activeTab: 'documents',
   };
+
+  let importQueue = [];
+  let entryCtx = null; // { mode: 'import'|'manual'|'edit', file?, parsed?, existingEntry? }
 
   // ---------------------------------------------------------------------
   // Utils
   // ---------------------------------------------------------------------
-  function formatSize(bytes) {
+  function escapeHtml(str) {
+    return String(str ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function formatAmount(n) {
+    return Number(n).toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function formatDateLabel(iso) {
+    const d = new Date(`${iso}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return iso;
+    const s = d.toLocaleDateString('fr-FR', { weekday: 'short', day: '2-digit', month: 'long' });
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  function formatDateShort(iso) {
+    const d = new Date(`${iso}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  }
+
+  function formatFileSize(bytes) {
     if (bytes < 1024) return `${bytes} o`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} Ko`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} Mo`;
   }
 
-  function formatDate(ts) {
-    return new Date(ts).toLocaleDateString('fr-FR', {
-      day: '2-digit',
-      month: 'short',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  }
-
-  function formatAmount(n) {
-    return n.toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  }
-
-  function persist() {
-    SDFData.save(state.data);
-  }
-
-  // ---------------------------------------------------------------------
-  // Tabs
-  // ---------------------------------------------------------------------
-  function initTabs() {
-    document.querySelectorAll('.tab-bar__btn').forEach((btn) => {
-      btn.addEventListener('click', () => switchTab(btn.dataset.tab));
-    });
-  }
-
-  function switchTab(tab) {
-    state.activeTab = tab;
-    document.querySelectorAll('.tab-panel').forEach((panel) => {
-      panel.hidden = panel.dataset.tabPanel !== tab;
-    });
-    document.querySelectorAll('.tab-bar__btn').forEach((btn) => {
-      btn.classList.toggle('is-active', btn.dataset.tab === tab);
-    });
-  }
-
-  // ---------------------------------------------------------------------
-  // Documents (IndexedDB)
-  // ---------------------------------------------------------------------
-  const docsList = document.getElementById('documents-list');
-  const docsEmpty = document.getElementById('documents-empty');
-  const fileInput = document.getElementById('file-input');
-  const importBtn = document.getElementById('import-btn');
-
-  async function refreshDocuments() {
-    const docs = await SDFDatabase.getAllDocuments();
-    docsList.innerHTML = '';
-    docsEmpty.hidden = docs.length > 0;
-
-    docs.forEach((doc) => {
-      const li = document.createElement('li');
-      li.className = 'doc-card';
-
-      const openBtn = document.createElement('button');
-      openBtn.type = 'button';
-      openBtn.className = 'doc-card__open';
-      openBtn.innerHTML = `
-        <span class="doc-card__icon" aria-hidden="true">📄</span>
-        <span class="doc-card__body">
-          <span class="doc-card__name"></span>
-          <div class="doc-card__meta"></div>
-        </span>
-      `;
-      openBtn.querySelector('.doc-card__name').textContent = doc.name;
-      openBtn.querySelector('.doc-card__meta').textContent = `${formatSize(doc.size)} · ajouté le ${formatDate(doc.addedAt)}`;
-      openBtn.addEventListener('click', () => openDocument(doc));
-
-      const deleteBtn = document.createElement('button');
-      deleteBtn.type = 'button';
-      deleteBtn.className = 'doc-card__delete';
-      deleteBtn.setAttribute('aria-label', `Supprimer ${doc.name}`);
-      deleteBtn.textContent = '✕';
-      deleteBtn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        if (confirm(`Supprimer "${doc.name}" ?`)) {
-          await SDFDatabase.deleteDocument(doc.id);
-          refreshDocuments();
-        }
-      });
-
-      li.appendChild(openBtn);
-      li.appendChild(deleteBtn);
-      docsList.appendChild(li);
-    });
-  }
-
-  function openDocument(doc) {
-    const url = URL.createObjectURL(doc.blob);
-    // Ouvre le PDF dans un nouvel onglet : le navigateur mobile prend le
-    // relais avec son viewer PDF natif en plein écran.
+  function openBlobInNewTab(blob, name) {
+    const url = URL.createObjectURL(blob);
     const win = window.open(url, '_blank');
     if (!win) {
-      // Popup bloquée : on retente via un lien direct.
       const a = document.createElement('a');
       a.href = url;
       a.target = '_blank';
       a.rel = 'noopener';
       a.click();
     }
-    // Libère la mémoire une fois le viewer probablement chargé.
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
 
-  function initImport() {
-    importBtn.addEventListener('click', () => fileInput.click());
-    fileInput.addEventListener('change', async () => {
-      const files = Array.from(fileInput.files || []);
-      for (const file of files) {
-        if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) continue;
-        await SDFDatabase.addDocument({
-          name: file.name,
-          size: file.size,
-          type: file.type,
-          blob: file,
-        });
-      }
-      fileInput.value = '';
-      refreshDocuments();
+  const TYPE_META = {
+    transport: { icon: '🚌', label: 'Transport' },
+    event: { icon: '🎟️', label: 'Billet événement' },
+    lodging: { icon: '🛏️', label: 'Hébergement' },
+    other: { icon: '🧾', label: 'Autre' },
+  };
+
+  const PAYMENT_META = {
+    paid: { icon: '✅', label: 'Déjà payé' },
+    due: { icon: '⏳', label: 'À venir' },
+    estimate: { icon: '🎲', label: 'Estimé' },
+  };
+
+  // ---------------------------------------------------------------------
+  // Modales génériques
+  // ---------------------------------------------------------------------
+  function showModal(sel) {
+    const modal = $(sel);
+    modal.hidden = false;
+    requestAnimationFrame(() => modal.classList.add('is-open'));
+  }
+
+  function hideModal(sel) {
+    const modal = $(sel);
+    modal.classList.remove('is-open');
+    setTimeout(() => {
+      modal.hidden = true;
+    }, 150);
+  }
+
+  $$('.modal').forEach((modal) => {
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) hideModal(`#${modal.id}`);
     });
+  });
+
+  // ---------------------------------------------------------------------
+  // Navigation accueil / voyage
+  // ---------------------------------------------------------------------
+  function showView(view) {
+    state.view = view;
+    $('#view-home').hidden = view !== 'home';
+    $('#view-trip').hidden = view !== 'trip';
+    $('#header-home').hidden = view !== 'home';
+    $('#header-trip').hidden = view !== 'trip';
+    $('#tab-bar').hidden = view !== 'trip';
+  }
+
+  async function goHome() {
+    state.currentTrip = null;
+    showView('home');
+    await renderHome();
+  }
+
+  async function openTrip(tripId) {
+    const trip = await VoyagheureDB.getTrip(tripId);
+    if (!trip) return;
+    state.currentTrip = trip;
+    showView('trip');
+    $('#trip-title').textContent = trip.name;
+    const bits = [trip.place, [trip.startDate, trip.endDate].filter(Boolean).map(formatDateShort).join(' → ')].filter(Boolean);
+    $('#trip-subtitle').textContent = bits.join(' · ');
+    switchTab('documents');
+    await refreshAll();
   }
 
   // ---------------------------------------------------------------------
-  // Planning
+  // Écran d'accueil : liste des voyages
   // ---------------------------------------------------------------------
-  function renderPlanning() {
-    const container = document.getElementById('planning-timeline');
+  async function renderHome() {
+    const trips = await VoyagheureDB.getAllTrips();
+    const list = $('#trips-list');
+    list.innerHTML = '';
+    $('#trips-empty').hidden = trips.length > 0;
+
+    for (const trip of trips) {
+      const entries = await VoyagheureDB.getEntriesForTrip(trip.id);
+      const li = document.createElement('li');
+      li.className = 'trip-card';
+
+      const openBtn = document.createElement('button');
+      openBtn.type = 'button';
+      openBtn.className = 'trip-card__open';
+      const dateRange = [trip.startDate, trip.endDate].filter(Boolean).map(formatDateShort).join(' → ');
+      openBtn.innerHTML = `
+        <span class="trip-card__icon" aria-hidden="true">🧳</span>
+        <span class="trip-card__body">
+          <span class="trip-card__name">${escapeHtml(trip.name)}</span>
+          <span class="trip-card__meta">${[escapeHtml(trip.place), dateRange].filter(Boolean).join(' · ') || 'Aucune date renseignée'}</span>
+          <span class="trip-card__count">${entries.length} entrée${entries.length > 1 ? 's' : ''}</span>
+        </span>
+      `;
+      openBtn.addEventListener('click', () => openTrip(trip.id));
+
+      const deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.className = 'trip-card__delete';
+      deleteBtn.setAttribute('aria-label', `Supprimer ${trip.name}`);
+      deleteBtn.textContent = '✕';
+      deleteBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (confirm(`Supprimer le voyage "${trip.name}" et toutes ses entrées ?`)) {
+          await VoyagheureDB.deleteTrip(trip.id);
+          renderHome();
+        }
+      });
+
+      li.appendChild(openBtn);
+      li.appendChild(deleteBtn);
+      list.appendChild(li);
+    }
+  }
+
+  function openTripModal() {
+    $('#trip-form').reset();
+    showModal('#trip-modal');
+    $('#trip-name').focus();
+  }
+
+  $('#new-trip-btn').addEventListener('click', openTripModal);
+  $('#trip-cancel').addEventListener('click', () => hideModal('#trip-modal'));
+  $('#back-to-home').addEventListener('click', goHome);
+
+  $('#trip-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const name = $('#trip-name').value.trim();
+    if (!name) return;
+    const trip = await VoyagheureDB.createTrip({
+      name,
+      place: $('#trip-place').value.trim(),
+      startDate: $('#trip-start').value || null,
+      endDate: $('#trip-end').value || null,
+    });
+    hideModal('#trip-modal');
+    await openTrip(trip.id);
+  });
+
+  // ---------------------------------------------------------------------
+  // Onglets (au sein d'un voyage)
+  // ---------------------------------------------------------------------
+  function switchTab(tab) {
+    state.activeTab = tab;
+    $$('.tab-panel').forEach((panel) => {
+      panel.hidden = panel.dataset.tabPanel !== tab;
+    });
+    $$('.tab-bar__btn').forEach((btn) => {
+      btn.classList.toggle('is-active', btn.dataset.tab === tab);
+    });
+  }
+
+  $$('.tab-bar__btn').forEach((btn) => {
+    btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+  });
+
+  async function refreshAll() {
+    if (!state.currentTrip) return;
+    const entries = await VoyagheureDB.getEntriesForTrip(state.currentTrip.id);
+    renderEntries(entries);
+    renderPlanning(entries);
+    renderBudget(entries);
+  }
+
+  // ---------------------------------------------------------------------
+  // Onglet Entrées (import / liste / ajout manuel)
+  // ---------------------------------------------------------------------
+  function renderEntries(entries) {
+    const list = $('#entries-list');
+    list.innerHTML = '';
+    const sorted = [...entries].sort((a, b) => b.addedAt - a.addedAt);
+    $('#entries-empty').hidden = sorted.length > 0;
+
+    sorted.forEach((entry) => {
+      const meta = TYPE_META[entry.type] || TYPE_META.other;
+      const li = document.createElement('li');
+      li.className = `doc-card type-${entry.type}`;
+
+      const openBtn = document.createElement('button');
+      openBtn.type = 'button';
+      openBtn.className = 'doc-card__open';
+      const metaBits = [
+        meta.label,
+        entry.startDate ? formatDateShort(entry.startDate) : null,
+        entry.price != null ? `${formatAmount(entry.price)} €` : null,
+      ].filter(Boolean);
+      openBtn.innerHTML = `
+        <span class="doc-card__icon" aria-hidden="true">${meta.icon}</span>
+        <span class="doc-card__body">
+          <span class="doc-card__name">${escapeHtml(entry.title)}</span>
+          <div class="doc-card__meta">${escapeHtml(metaBits.join(' · '))}</div>
+        </span>
+      `;
+      openBtn.addEventListener('click', () => {
+        if (entry.pdfBlob) {
+          openBlobInNewTab(entry.pdfBlob, entry.pdfName || entry.title);
+        } else {
+          openEntryModal({ mode: 'edit', existingEntry: entry });
+        }
+      });
+
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'doc-card__edit';
+      editBtn.setAttribute('aria-label', `Modifier ${entry.title}`);
+      editBtn.textContent = '✎';
+      editBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openEntryModal({ mode: 'edit', existingEntry: entry });
+      });
+
+      const deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.className = 'doc-card__delete';
+      deleteBtn.setAttribute('aria-label', `Supprimer ${entry.title}`);
+      deleteBtn.textContent = '✕';
+      deleteBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (confirm(`Supprimer "${entry.title}" ?`)) {
+          await VoyagheureDB.deleteEntry(entry.id);
+          refreshAll();
+        }
+      });
+
+      li.appendChild(openBtn);
+      li.appendChild(editBtn);
+      li.appendChild(deleteBtn);
+      list.appendChild(li);
+    });
+  }
+
+  $('#import-btn').addEventListener('click', () => $('#file-input').click());
+
+  $('#file-input').addEventListener('change', async () => {
+    const files = Array.from($('#file-input').files || []).filter(
+      (f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')
+    );
+    $('#file-input').value = '';
+    if (files.length === 0) return;
+    importQueue = files;
+    await processNextImport();
+  });
+
+  async function processNextImport() {
+    if (importQueue.length === 0) return;
+    const file = importQueue.shift();
+    $('#import-status').hidden = false;
+    let parsed;
+    try {
+      parsed = await VoyagheureParser.analyzePdf(file);
+    } catch (err) {
+      console.warn('Analyse du PDF impossible', err);
+      parsed = { type: 'event', title: file.name.replace(/\.pdf$/i, ''), startDate: null, startTime: null, endDate: null, place: '', price: null, reference: '' };
+    }
+    $('#import-status').hidden = true;
+    openEntryModal({ mode: 'import', file, parsed });
+  }
+
+  $('#manual-add-btn').addEventListener('click', () => {
+    openEntryModal({ mode: 'manual' });
+  });
+
+  function openEntryModal(ctx) {
+    entryCtx = ctx;
+    const isEdit = ctx.mode === 'edit';
+    const isImport = ctx.mode === 'import';
+    const data = isEdit ? ctx.existingEntry : ctx.parsed || {};
+
+    $('#entry-modal-title').textContent = isEdit ? 'Modifier l’entrée' : isImport ? 'Confirme les infos détectées' : 'Nouvelle entrée';
+    $('#entry-modal-hint').textContent = isImport ? `Détecté depuis « ${ctx.file.name} » — vérifie et corrige si besoin.` : '';
+
+    $('#entry-type').value = data.type || 'other';
+    $('#entry-title').value = data.title || '';
+    $('#entry-start-date').value = data.startDate || '';
+    $('#entry-start-time').value = data.startTime || '';
+    $('#entry-end-date').value = data.endDate || '';
+    $('#entry-place').value = data.place || '';
+    $('#entry-price').value = data.price === null || data.price === undefined ? '' : data.price;
+    $('#entry-reference').value = data.reference || '';
+    $('#entry-payment-status').value = data.paymentStatus || (isImport ? 'paid' : 'estimate');
+
+    const blob = isEdit ? ctx.existingEntry.pdfBlob : isImport ? ctx.file : null;
+    const viewBtn = $('#entry-view-pdf');
+    viewBtn.hidden = !blob;
+    viewBtn.onclick = blob ? () => openBlobInNewTab(blob, (isEdit && ctx.existingEntry.pdfName) || ctx.file?.name || data.title) : null;
+
+    $('#entry-delete').hidden = !isEdit;
+
+    showModal('#entry-modal');
+  }
+
+  function closeEntryModalAndContinueQueue() {
+    hideModal('#entry-modal');
+    const wasImport = entryCtx && entryCtx.mode === 'import';
+    entryCtx = null;
+    if (wasImport && importQueue.length > 0) {
+      setTimeout(processNextImport, 180);
+    }
+  }
+
+  $('#entry-cancel').addEventListener('click', closeEntryModalAndContinueQueue);
+
+  $('#entry-delete').addEventListener('click', async () => {
+    if (!entryCtx || entryCtx.mode !== 'edit') return;
+    if (confirm(`Supprimer "${entryCtx.existingEntry.title}" ?`)) {
+      await VoyagheureDB.deleteEntry(entryCtx.existingEntry.id);
+      closeEntryModalAndContinueQueue();
+      refreshAll();
+    }
+  });
+
+  $('#entry-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!entryCtx) return;
+
+    const values = {
+      type: $('#entry-type').value,
+      title: $('#entry-title').value.trim(),
+      startDate: $('#entry-start-date').value || null,
+      startTime: $('#entry-start-time').value || null,
+      endDate: $('#entry-end-date').value || null,
+      place: $('#entry-place').value.trim(),
+      price: $('#entry-price').value === '' ? null : Number($('#entry-price').value),
+      reference: $('#entry-reference').value.trim(),
+      paymentStatus: $('#entry-payment-status').value,
+    };
+    if (!values.title) return;
+
+    if (entryCtx.mode === 'edit') {
+      await VoyagheureDB.updateEntry({ ...entryCtx.existingEntry, ...values });
+    } else {
+      await VoyagheureDB.createEntry({
+        tripId: state.currentTrip.id,
+        ...values,
+        pdfBlob: entryCtx.mode === 'import' ? entryCtx.file : null,
+        pdfName: entryCtx.mode === 'import' ? entryCtx.file.name : null,
+      });
+    }
+
+    closeEntryModalAndContinueQueue();
+    await refreshAll();
+  });
+
+  // ---------------------------------------------------------------------
+  // Onglet Planning
+  // ---------------------------------------------------------------------
+  function renderPlanning(entries) {
+    const container = $('#planning-timeline');
     container.innerHTML = '';
 
-    state.data.planning.forEach((day) => {
+    const withDate = entries.filter((e) => e.startDate);
+    const withoutDate = entries.filter((e) => !e.startDate);
+    $('#planning-empty').hidden = entries.length > 0;
+
+    const byDate = new Map();
+    withDate.forEach((e) => {
+      if (!byDate.has(e.startDate)) byDate.set(e.startDate, []);
+      byDate.get(e.startDate).push(e);
+    });
+    const sortedDates = Array.from(byDate.keys()).sort();
+    sortedDates.forEach((date) => {
+      byDate.get(date).sort((a, b) => (a.startTime || '99:99').localeCompare(b.startTime || '99:99'));
+    });
+
+    const renderDay = (label, items) => {
       const dayEl = document.createElement('div');
       dayEl.className = 'timeline-day';
-
-      const label = document.createElement('p');
-      label.className = 'timeline-day__label';
-      label.textContent = day.label;
-      dayEl.appendChild(label);
+      const labelEl = document.createElement('p');
+      labelEl.className = 'timeline-day__label';
+      labelEl.textContent = label;
+      dayEl.appendChild(labelEl);
 
       const itemsEl = document.createElement('div');
       itemsEl.className = 'timeline-items';
-
-      day.items.forEach((item) => {
-        const itemEl = document.createElement('div');
-        itemEl.className = 'timeline-item';
-        itemEl.innerHTML = `
-          <span class="timeline-item__icon" aria-hidden="true">${item.icon}</span>
+      items.forEach((entry) => {
+        const meta = TYPE_META[entry.type] || TYPE_META.other;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `timeline-item type-${entry.type}`;
+        btn.innerHTML = `
+          <span class="timeline-item__icon" aria-hidden="true">${meta.icon}</span>
           <span>
-            <p class="timeline-item__type">${item.type}</p>
-            <p class="timeline-item__title">${item.title}</p>
-            <p class="timeline-item__time">${item.time}</p>
+            <p class="timeline-item__type">${meta.label}${entry.startTime ? ` · ${entry.startTime}` : ''}</p>
+            <p class="timeline-item__title">${escapeHtml(entry.title)}</p>
+            ${entry.place ? `<p class="timeline-item__time">${escapeHtml(entry.place)}</p>` : ''}
           </span>
         `;
-        itemsEl.appendChild(itemEl);
+        btn.addEventListener('click', () => openEntryModal({ mode: 'edit', existingEntry: entry }));
+        itemsEl.appendChild(btn);
       });
-
       dayEl.appendChild(itemsEl);
       container.appendChild(dayEl);
+    };
+
+    sortedDates.forEach((date) => renderDay(formatDateLabel(date), byDate.get(date)));
+    if (withoutDate.length > 0) renderDay('Sans date', withoutDate);
+  }
+
+  // ---------------------------------------------------------------------
+  // Onglet Budget
+  // ---------------------------------------------------------------------
+  function renderBudget(entries) {
+    const priced = entries.filter((e) => e.price !== null && e.price !== undefined);
+    $('#budget-empty').hidden = priced.length > 0;
+
+    const sections = { paid: [], due: [], estimate: [] };
+    priced.forEach((e) => {
+      (sections[e.paymentStatus] || sections.estimate).push(e);
     });
-  }
 
-  // ---------------------------------------------------------------------
-  // Budget
-  // ---------------------------------------------------------------------
-  const SECTION_LABELS = { paid: 'Déjà payé', due: 'À venir', estimate: 'Estimé' };
+    const sum = (arr) => arr.reduce((s, e) => s + Number(e.price), 0);
+    const totals = { paid: sum(sections.paid), due: sum(sections.due), estimate: sum(sections.estimate) };
+    const total = totals.paid + totals.due + totals.estimate;
 
-  function sectionTotal(section) {
-    return state.data.budget
-      .filter((item) => item.section === section)
-      .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
-  }
-
-  function renderBudgetSummary() {
-    const summary = document.getElementById('budget-summary');
-    const paid = sectionTotal('paid');
-    const due = sectionTotal('due');
-    const estimate = sectionTotal('estimate');
-    const total = paid + due + estimate;
-
-    summary.innerHTML = `
+    $('#budget-summary').innerHTML = `
       <div class="budget-summary__card">
         <p class="budget-summary__label">Payé</p>
-        <p class="budget-summary__value">${formatAmount(paid)} €</p>
+        <p class="budget-summary__value">${formatAmount(totals.paid)} €</p>
       </div>
       <div class="budget-summary__card">
         <p class="budget-summary__label">À venir</p>
-        <p class="budget-summary__value">${formatAmount(due)} €</p>
+        <p class="budget-summary__value">${formatAmount(totals.due)} €</p>
       </div>
       <div class="budget-summary__card">
         <p class="budget-summary__label">Total est.</p>
         <p class="budget-summary__value budget-summary__value--total">${formatAmount(total)} €</p>
       </div>
     `;
-  }
 
-  function renderBudgetSection(section) {
-    const list = document.querySelector(`.budget-list[data-list="${section}"]`);
-    list.innerHTML = '';
-
-    state.data.budget
-      .filter((item) => item.section === section)
-      .forEach((item) => {
+    ['paid', 'due', 'estimate'].forEach((status) => {
+      const list = $(`.budget-list[data-list="${status}"]`);
+      list.innerHTML = '';
+      sections[status].forEach((entry) => {
+        const meta = TYPE_META[entry.type] || TYPE_META.other;
         const li = document.createElement('li');
         li.className = 'budget-row';
-
-        const labelInput = document.createElement('input');
-        labelInput.className = 'budget-row__label';
-        labelInput.type = 'text';
-        labelInput.value = item.label;
-        labelInput.setAttribute('aria-label', 'Libellé de la dépense');
-        labelInput.addEventListener('change', () => {
-          item.label = labelInput.value.trim() || item.label;
-          persist();
-        });
-
-        const amountWrap = document.createElement('div');
-        amountWrap.className = 'budget-row__amount-wrap';
-        const amountInput = document.createElement('input');
-        amountInput.className = 'budget-row__amount';
-        amountInput.type = 'number';
-        amountInput.inputMode = 'decimal';
-        amountInput.step = '0.01';
-        amountInput.min = '0';
-        amountInput.placeholder = '0';
-        amountInput.value = item.amount === null || item.amount === undefined ? '' : item.amount;
-        amountInput.setAttribute('aria-label', `Montant pour ${item.label}`);
-        amountInput.addEventListener('input', () => {
-          const val = amountInput.value === '' ? null : parseFloat(amountInput.value);
-          item.amount = Number.isFinite(val) ? val : null;
-          persist();
-          renderBudgetSummary();
-        });
-        const currency = document.createElement('span');
-        currency.className = 'budget-row__currency';
-        currency.textContent = '€';
-        amountWrap.appendChild(amountInput);
-        amountWrap.appendChild(currency);
-
-        li.appendChild(labelInput);
-        li.appendChild(amountWrap);
-
-        if (item.custom) {
-          const delBtn = document.createElement('button');
-          delBtn.type = 'button';
-          delBtn.className = 'budget-row__delete';
-          delBtn.textContent = '✕';
-          delBtn.setAttribute('aria-label', `Supprimer ${item.label}`);
-          delBtn.addEventListener('click', () => {
-            state.data.budget = state.data.budget.filter((b) => b.id !== item.id);
-            persist();
-            renderBudgetSection(section);
-            renderBudgetSummary();
-          });
-          li.appendChild(delBtn);
-        }
-
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `budget-row__open type-${entry.type}`;
+        btn.innerHTML = `
+          <span class="budget-row__icon" aria-hidden="true">${meta.icon}</span>
+          <span class="budget-row__label">${escapeHtml(entry.title)}</span>
+          <span class="budget-row__amount">${formatAmount(entry.price)} €</span>
+        `;
+        btn.addEventListener('click', () => openEntryModal({ mode: 'edit', existingEntry: entry }));
+        li.appendChild(btn);
         list.appendChild(li);
-      });
-  }
-
-  function renderBudget() {
-    renderBudgetSummary();
-    ['paid', 'due', 'estimate'].forEach(renderBudgetSection);
-  }
-
-  function initBudgetAddButtons() {
-    document.querySelectorAll('[data-add]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const section = btn.dataset.add;
-        state.data.budget.push({
-          id: `custom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          section,
-          label: `Nouvelle dépense (${SECTION_LABELS[section]})`,
-          amount: null,
-          custom: true,
-        });
-        persist();
-        renderBudgetSection(section);
-        renderBudgetSummary();
       });
     });
   }
@@ -300,9 +512,9 @@
   // Statut hors-ligne
   // ---------------------------------------------------------------------
   function initOfflineBadge() {
-    const badge = document.getElementById('offline-badge');
     const update = () => {
-      badge.hidden = navigator.onLine;
+      $('#offline-badge-home').hidden = navigator.onLine;
+      $('#offline-badge-trip').hidden = navigator.onLine;
     };
     window.addEventListener('online', update);
     window.addEventListener('offline', update);
@@ -313,7 +525,7 @@
   // Installation (Android / Chrome)
   // ---------------------------------------------------------------------
   function initInstallPrompt() {
-    const installBtn = document.getElementById('install-btn');
+    const installBtn = $('#install-btn');
     let deferredPrompt = null;
 
     window.addEventListener('beforeinstallprompt', (e) => {
@@ -351,18 +563,12 @@
   // ---------------------------------------------------------------------
   // Init
   // ---------------------------------------------------------------------
-  function init() {
-    initTabs();
-    initImport();
-    initBudgetAddButtons();
+  async function init() {
     initOfflineBadge();
     initInstallPrompt();
     initServiceWorker();
-
-    refreshDocuments();
-    renderPlanning();
-    renderBudget();
+    await renderHome();
   }
 
-  document.addEventListener('DOMContentLoaded', init);
+  init();
 })();

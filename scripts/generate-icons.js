@@ -1,8 +1,8 @@
 /**
  * Génère les icônes PNG de la PWA (aucune dépendance externe).
- * Motif "soleil rétro" corail -> rose sur fond aubergine, aux couleurs
- * de l'affiche du festival. Ré-exécuter avec `node scripts/generate-icons.js`
- * si les couleurs de la charte changent.
+ * Motif "soleil rétro" corail -> rose sur fond aubergine, dans la palette
+ * de l'app. Ré-exécuter avec `node scripts/generate-icons.js` si les
+ * couleurs de la charte changent.
  */
 const fs = require('fs');
 const path = require('path');

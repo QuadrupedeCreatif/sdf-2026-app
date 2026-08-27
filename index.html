@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>SDF 2026</title>
-  <meta name="description" content="Billets, planning et budget hors-ligne pour le Summer Dance Forever 2026 à Amsterdam." />
+  <title>Voyag'heure</title>
+  <meta name="description" content="Gère tes billets de voyage (transport, hébergement, événements) hors-ligne : import PDF, planning et budget automatiques." />
 
   <!-- PWA -->
   <link rel="manifest" href="manifest.json" />
@@ -13,7 +13,7 @@
   <!-- iOS -->
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="apple-mobile-web-app-title" content="SDF 2026" />
+  <meta name="apple-mobile-web-app-title" content="Voyag'heure" />
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
 
   <!-- Favicon -->
@@ -33,80 +33,118 @@
 <body>
   <div id="app">
     <header class="app-header">
-      <div class="app-header__top">
-        <h1 class="app-title">SDF 2026</h1>
-        <span id="offline-badge" class="offline-badge" hidden>Hors-ligne</span>
+      <!-- En-tête écran d'accueil (liste des voyages) -->
+      <div id="header-home">
+        <div class="app-header__top">
+          <h1 class="app-title">Voyag'heure</h1>
+          <span id="offline-badge-home" class="offline-badge" hidden>Hors-ligne</span>
+        </div>
+        <p class="app-subtitle">Tes billets, où que tu ailles</p>
       </div>
-      <p class="app-subtitle">Paradiso · Amsterdam · 28–31 août</p>
+
+      <!-- En-tête écran d'un voyage -->
+      <div id="header-trip" hidden>
+        <div class="app-header__top">
+          <button id="back-to-home" class="icon-btn" type="button" aria-label="Retour aux voyages">←</button>
+          <span id="offline-badge-trip" class="offline-badge" hidden>Hors-ligne</span>
+        </div>
+        <h1 id="trip-title" class="app-title app-title--trip"></h1>
+        <p id="trip-subtitle" class="app-subtitle"></p>
+      </div>
     </header>
 
     <button id="install-btn" class="install-banner" hidden type="button">
-      📲 Installer SDF 2026 sur l'écran d'accueil
+      📲 Installer Voyag'heure sur l'écran d'accueil
     </button>
 
+    <div id="import-status" class="import-status" hidden>Analyse du PDF…</div>
+
     <main class="app-main">
-      <!-- DOCUMENTS -->
-      <section id="tab-documents" class="tab-panel" data-tab-panel="documents">
+      <!-- ÉCRAN D'ACCUEIL : liste des voyages -->
+      <section id="view-home" class="view">
         <div class="panel-head">
-          <h2>Mes documents</h2>
-          <p class="panel-hint">Billets, factures, réservations — stockés uniquement sur ton téléphone.</p>
+          <h2>Mes voyages</h2>
+          <p class="panel-hint">Crée un voyage pour commencer à importer tes billets.</p>
         </div>
 
-        <input id="file-input" type="file" accept="application/pdf,.pdf" multiple hidden />
-        <button id="import-btn" class="btn btn--primary" type="button">
-          <span aria-hidden="true">＋</span> Importer des PDF
+        <button id="new-trip-btn" class="btn btn--primary" type="button">
+          <span aria-hidden="true">＋</span> Nouveau voyage
         </button>
 
-        <ul id="documents-list" class="doc-list"></ul>
+        <ul id="trips-list" class="trip-list"></ul>
 
-        <p id="documents-empty" class="empty-state">
-          Aucun document pour l'instant.<br />
-          Importe tes billets de festival, tes réservations FlixBus et ta confirmation Hostelworld en PDF.
+        <p id="trips-empty" class="empty-state">
+          Aucun voyage pour l'instant.<br />
+          Crée ton premier voyage pour importer tes billets et réservations.
         </p>
       </section>
 
-      <!-- PLANNING -->
-      <section id="tab-planning" class="tab-panel" data-tab-panel="planning" hidden>
-        <div class="panel-head">
-          <h2>Planning du séjour</h2>
-          <p class="panel-hint">Vérifie les horaires exacts sur tes billets importés.</p>
-        </div>
-        <div id="planning-timeline" class="timeline"></div>
-      </section>
+      <!-- ÉCRAN D'UN VOYAGE : Entrées / Planning / Budget -->
+      <section id="view-trip" class="view" hidden>
+        <section id="tab-documents" class="tab-panel" data-tab-panel="documents">
+          <div class="panel-head">
+            <h2>Mes entrées</h2>
+            <p class="panel-hint">Billets, transport, hébergement — stockés uniquement sur ton téléphone.</p>
+          </div>
 
-      <!-- BUDGET -->
-      <section id="tab-budget" class="tab-panel" data-tab-panel="budget" hidden>
-        <div class="panel-head">
-          <h2>Budget</h2>
-          <p class="panel-hint">Renseigne tes montants (€) — tout reste enregistré sur ton téléphone.</p>
-        </div>
+          <input id="file-input" type="file" accept="application/pdf,.pdf" multiple hidden />
+          <div class="entry-actions">
+            <button id="import-btn" class="btn btn--primary" type="button">
+              <span aria-hidden="true">＋</span> Importer des PDF
+            </button>
+            <button id="manual-add-btn" class="btn btn--ghost" type="button">Ajouter manuellement</button>
+          </div>
 
-        <div class="budget-summary" id="budget-summary"></div>
+          <ul id="entries-list" class="doc-list"></ul>
 
-        <div class="budget-section" data-section="paid">
-          <h3 class="budget-section__title budget-section__title--paid">✅ Déjà payé</h3>
-          <ul class="budget-list" data-list="paid"></ul>
-          <button class="btn btn--ghost btn--add" type="button" data-add="paid">+ Ajouter une dépense</button>
-        </div>
+          <p id="entries-empty" class="empty-state">
+            Aucune entrée pour l'instant.<br />
+            Importe un billet en PDF, ou ajoute une dépense à la main.
+          </p>
+        </section>
 
-        <div class="budget-section" data-section="due">
-          <h3 class="budget-section__title budget-section__title--due">⏳ À venir</h3>
-          <ul class="budget-list" data-list="due"></ul>
-          <button class="btn btn--ghost btn--add" type="button" data-add="due">+ Ajouter une dépense</button>
-        </div>
+        <section id="tab-planning" class="tab-panel" data-tab-panel="planning" hidden>
+          <div class="panel-head">
+            <h2>Planning</h2>
+            <p class="panel-hint">Généré automatiquement à partir de tes entrées, jour par jour.</p>
+          </div>
+          <div id="planning-timeline" class="timeline"></div>
+          <p id="planning-empty" class="empty-state">
+            Rien à afficher pour l'instant.<br />
+            Les entrées avec une date apparaîtront ici.
+          </p>
+        </section>
 
-        <div class="budget-section" data-section="estimate">
-          <h3 class="budget-section__title budget-section__title--estimate">🎲 Estimé</h3>
-          <ul class="budget-list" data-list="estimate"></ul>
-          <button class="btn btn--ghost btn--add" type="button" data-add="estimate">+ Ajouter une dépense</button>
-        </div>
+        <section id="tab-budget" class="tab-panel" data-tab-panel="budget" hidden>
+          <div class="panel-head">
+            <h2>Budget</h2>
+            <p class="panel-hint">Calculé automatiquement à partir du prix de tes entrées.</p>
+          </div>
+
+          <div class="budget-summary" id="budget-summary"></div>
+
+          <div class="budget-section" data-section="paid">
+            <h3 class="budget-section__title budget-section__title--paid">✅ Déjà payé</h3>
+            <ul class="budget-list" data-list="paid"></ul>
+          </div>
+          <div class="budget-section" data-section="due">
+            <h3 class="budget-section__title budget-section__title--due">⏳ À venir</h3>
+            <ul class="budget-list" data-list="due"></ul>
+          </div>
+          <div class="budget-section" data-section="estimate">
+            <h3 class="budget-section__title budget-section__title--estimate">🎲 Estimé</h3>
+            <ul class="budget-list" data-list="estimate"></ul>
+          </div>
+
+          <p id="budget-empty" class="empty-state">Aucune entrée avec un montant pour l'instant.</p>
+        </section>
       </section>
     </main>
 
-    <nav class="tab-bar" aria-label="Navigation principale">
+    <nav id="tab-bar" class="tab-bar" aria-label="Navigation du voyage" hidden>
       <button class="tab-bar__btn is-active" data-tab="documents" type="button">
         <span class="tab-bar__icon" aria-hidden="true">📄</span>
-        <span>Documents</span>
+        <span>Entrées</span>
       </button>
       <button class="tab-bar__btn" data-tab="planning" type="button">
         <span class="tab-bar__icon" aria-hidden="true">🗓️</span>
@@ -119,8 +157,75 @@
     </nav>
   </div>
 
-  <script src="js/db.js"></script>
-  <script src="js/data.js"></script>
-  <script src="js/app.js"></script>
+  <!-- Modale : nouveau voyage -->
+  <div id="trip-modal" class="modal" hidden>
+    <div class="modal__sheet">
+      <h2 class="modal__title">Nouveau voyage</h2>
+      <form id="trip-form">
+        <label class="field">
+          <span>Nom du voyage *</span>
+          <input type="text" id="trip-name" required placeholder="Ex. Festival à Amsterdam" />
+        </label>
+        <label class="field">
+          <span>Lieu</span>
+          <input type="text" id="trip-place" placeholder="Ex. Amsterdam, Pays-Bas" />
+        </label>
+        <div class="field-row">
+          <label class="field"><span>Début</span><input type="date" id="trip-start" /></label>
+          <label class="field"><span>Fin</span><input type="date" id="trip-end" /></label>
+        </div>
+        <div class="modal__actions">
+          <button type="button" class="btn btn--ghost" id="trip-cancel">Annuler</button>
+          <button type="submit" class="btn btn--primary">Créer</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modale : confirmation import / ajout manuel / édition d'une entrée -->
+  <div id="entry-modal" class="modal" hidden>
+    <div class="modal__sheet">
+      <h2 class="modal__title" id="entry-modal-title">Confirme les infos</h2>
+      <p class="modal__hint" id="entry-modal-hint"></p>
+      <form id="entry-form">
+        <label class="field">
+          <span>Type</span>
+          <select id="entry-type">
+            <option value="transport">🚌 Transport</option>
+            <option value="event">🎟️ Billet événement</option>
+            <option value="lodging">🛏️ Hébergement</option>
+            <option value="other">🧾 Autre</option>
+          </select>
+        </label>
+        <label class="field"><span>Titre *</span><input type="text" id="entry-title" required /></label>
+        <div class="field-row">
+          <label class="field"><span>Date de début</span><input type="date" id="entry-start-date" /></label>
+          <label class="field"><span>Heure</span><input type="time" id="entry-start-time" /></label>
+        </div>
+        <label class="field"><span>Date de fin (optionnelle)</span><input type="date" id="entry-end-date" /></label>
+        <label class="field"><span>Lieu</span><input type="text" id="entry-place" /></label>
+        <div class="field-row">
+          <label class="field"><span>Prix (€)</span><input type="number" step="0.01" min="0" id="entry-price" /></label>
+          <label class="field"><span>Référence</span><input type="text" id="entry-reference" /></label>
+        </div>
+        <label class="field">
+          <span>Statut de paiement</span>
+          <select id="entry-payment-status">
+            <option value="paid">✅ Déjà payé</option>
+            <option value="due">⏳ À venir</option>
+            <option value="estimate">🎲 Estimé</option>
+          </select>
+        </label>
+        <div class="modal__actions modal__actions--wrap">
+          <button type="button" class="btn btn--ghost" id="entry-view-pdf" hidden>Voir le PDF</button>
+          <button type="button" class="btn btn--danger" id="entry-delete" hidden>Supprimer</button>
+          <button type="button" class="btn btn--ghost" id="entry-cancel">Annuler</button>
+          <button type="submit" class="btn btn--primary">Enregistrer</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
 </body>
 </html>
