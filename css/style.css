@@ -398,6 +398,7 @@ body {
   cursor: pointer;
 }
 
+.doc-card__map,
 .doc-card__edit,
 .doc-card__delete {
   flex: none;
@@ -408,6 +409,11 @@ body {
   font-size: 13px;
   line-height: 1;
   cursor: pointer;
+}
+
+.doc-card__map {
+  background: rgba(107, 207, 159, 0.14);
+  color: var(--ok);
 }
 
 .doc-card__edit {
@@ -467,13 +473,35 @@ body {
   border-radius: 14px;
   padding: 10px 12px;
   display: flex;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+}
+
+.timeline-item__open {
+  flex: 1;
+  display: flex;
   gap: 10px;
   align-items: flex-start;
-  width: 100%;
+  min-width: 0;
   border: none;
+  background: none;
+  padding: 0;
   text-align: left;
   color: inherit;
   font-family: inherit;
+  cursor: pointer;
+}
+
+.timeline-item__map {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(107, 207, 159, 0.14);
+  color: var(--ok);
+  font-size: 14px;
   cursor: pointer;
 }
 
@@ -726,6 +754,22 @@ body {
   font-size: 12.5px;
   color: rgba(251, 238, 228, 0.55);
   margin: 0 0 14px;
+}
+
+.image-preview {
+  margin: 0 0 14px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--aubergine);
+  border: 1px solid rgba(242, 137, 90, 0.2);
+}
+
+.image-preview img {
+  display: block;
+  width: 100%;
+  max-height: 38vh;
+  object-fit: contain;
+  background: var(--aubergine);
 }
 
 .field {

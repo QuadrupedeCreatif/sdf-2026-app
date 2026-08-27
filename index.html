@@ -87,10 +87,10 @@
             <p class="panel-hint">Billets, transport, hébergement — stockés uniquement sur ton téléphone.</p>
           </div>
 
-          <input id="file-input" type="file" accept="application/pdf,.pdf" multiple hidden />
+          <input id="file-input" type="file" accept="application/pdf,image/*" multiple hidden />
           <div class="entry-actions">
             <button id="import-btn" class="btn btn--primary" type="button">
-              <span aria-hidden="true">＋</span> Importer des PDF
+              <span aria-hidden="true">＋</span> Importer un document
             </button>
             <button id="manual-add-btn" class="btn btn--ghost" type="button">Ajouter manuellement</button>
           </div>
@@ -99,7 +99,7 @@
 
           <p id="entries-empty" class="empty-state">
             Aucune entrée pour l'instant.<br />
-            Importe un billet en PDF, ou ajoute une dépense à la main.
+            Importe un billet en PDF ou en photo, ou ajoute une dépense à la main.
           </p>
         </section>
 
@@ -187,6 +187,9 @@
     <div class="modal__sheet">
       <h2 class="modal__title" id="entry-modal-title">Confirme les infos</h2>
       <p class="modal__hint" id="entry-modal-hint"></p>
+      <div id="entry-image-preview" class="image-preview" hidden>
+        <img id="entry-image-preview-img" alt="Aperçu du document importé" />
+      </div>
       <form id="entry-form">
         <label class="field">
           <span>Type</span>
@@ -204,6 +207,7 @@
         </div>
         <label class="field"><span>Date de fin (optionnelle)</span><input type="date" id="entry-end-date" /></label>
         <label class="field"><span>Lieu</span><input type="text" id="entry-place" /></label>
+        <label class="field"><span>Adresse</span><input type="text" id="entry-address" placeholder="Rue, ville, code postal" /></label>
         <div class="field-row">
           <label class="field"><span>Prix (€)</span><input type="number" step="0.01" min="0" id="entry-price" /></label>
           <label class="field"><span>Référence</span><input type="text" id="entry-reference" /></label>

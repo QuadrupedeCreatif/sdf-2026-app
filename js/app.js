@@ -59,6 +59,34 @@ import { VoyagheureParser } from './parser.js';
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
 
+  function isImageBlob(blob) {
+    return !!blob && typeof blob.type === 'string' && blob.type.startsWith('image/');
+  }
+
+  function attachmentViewLabel(blob) {
+    return isImageBlob(blob) ? "Voir l'original" : 'Voir le PDF';
+  }
+
+  // Deux modes d'import comptent comme "import" (queue, valeurs par défaut,
+  // pièce jointe attachée à la sauvegarde) : PDF (auto-détecté) et image
+  // (formulaire assisté sans extraction).
+  function isImportMode(mode) {
+    return mode === 'import' || mode === 'import-image';
+  }
+
+  function isIOSDevice() {
+    return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+  }
+
+  /** Ouvre l'app de navigation du téléphone (Plans sur iOS, Google Maps sinon). */
+  function openInMaps(address) {
+    const query = encodeURIComponent(address);
+    const url = isIOSDevice()
+      ? `https://maps.apple.com/?q=${query}`
+      : `https://www.google.com/maps/search/?api=1&query=${query}`;
+    window.open(url, '_blank', 'noopener');
+  }
+
   const TYPE_META = {
     transport: { icon: '🚌', label: 'Transport' },
     event: { icon: '🎟️', label: 'Billet événement' },
@@ -258,6 +286,21 @@ import { VoyagheureParser } from './parser.js';
         }
       });
 
+      li.appendChild(openBtn);
+
+      if (entry.address) {
+        const mapBtn = document.createElement('button');
+        mapBtn.type = 'button';
+        mapBtn.className = 'doc-card__map';
+        mapBtn.setAttribute('aria-label', `Itinéraire vers ${entry.address}`);
+        mapBtn.textContent = '📍';
+        mapBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openInMaps(entry.address);
+        });
+        li.appendChild(mapBtn);
+      }
+
       const editBtn = document.createElement('button');
       editBtn.type = 'button';
       editBtn.className = 'doc-card__edit';
@@ -281,19 +324,22 @@ import { VoyagheureParser } from './parser.js';
         }
       });
 
-      li.appendChild(openBtn);
       li.appendChild(editBtn);
       li.appendChild(deleteBtn);
       list.appendChild(li);
     });
   }
 
+  function isSupportedImportFile(f) {
+    if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) return true;
+    if (f.type.startsWith('image/') || /\.(png|jpe?g|webp|heic|heif)$/i.test(f.name)) return true;
+    return false;
+  }
+
   $('#import-btn').addEventListener('click', () => $('#file-input').click());
 
   $('#file-input').addEventListener('change', async () => {
-    const files = Array.from($('#file-input').files || []).filter(
-      (f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')
-    );
+    const files = Array.from($('#file-input').files || []).filter(isSupportedImportFile);
     $('#file-input').value = '';
     if (files.length === 0) return;
     importQueue = files;
@@ -303,13 +349,25 @@ import { VoyagheureParser } from './parser.js';
   async function processNextImport() {
     if (importQueue.length === 0) return;
     const file = importQueue.shift();
+
+    // Image : pas d'extraction automatique, juste un formulaire assisté
+    // avec l'image affichée en aperçu pour recopier rapidement.
+    if (file.type.startsWith('image/')) {
+      openEntryModal({
+        mode: 'import-image',
+        file,
+        parsed: { type: 'other', title: VoyagheureParser.titleFromFilename(file.name), startDate: null, startTime: null, endDate: null, place: '', address: '', price: null, reference: '' },
+      });
+      return;
+    }
+
     $('#import-status').hidden = false;
     let parsed;
     try {
       parsed = await VoyagheureParser.analyzePdf(file);
     } catch (err) {
       console.warn('Analyse du PDF impossible', err);
-      parsed = { type: 'event', title: file.name.replace(/\.pdf$/i, ''), startDate: null, startTime: null, endDate: null, place: '', price: null, reference: '' };
+      parsed = { type: 'event', title: VoyagheureParser.titleFromFilename(file.name), startDate: null, startTime: null, endDate: null, place: '', address: '', price: null, reference: '' };
     }
     $('#import-status').hidden = true;
     openEntryModal({ mode: 'import', file, parsed });
@@ -319,14 +377,43 @@ import { VoyagheureParser } from './parser.js';
     openEntryModal({ mode: 'manual' });
   });
 
+  let previewObjectUrl = null;
+
+  function clearImagePreview() {
+    $('#entry-image-preview').hidden = true;
+    $('#entry-image-preview-img').src = '';
+    if (previewObjectUrl) {
+      URL.revokeObjectURL(previewObjectUrl);
+      previewObjectUrl = null;
+    }
+  }
+
   function openEntryModal(ctx) {
     entryCtx = ctx;
     const isEdit = ctx.mode === 'edit';
-    const isImport = ctx.mode === 'import';
+    const isImport = isImportMode(ctx.mode);
+    const isImageImport = ctx.mode === 'import-image';
     const data = isEdit ? ctx.existingEntry : ctx.parsed || {};
 
-    $('#entry-modal-title').textContent = isEdit ? 'Modifier l’entrée' : isImport ? 'Confirme les infos détectées' : 'Nouvelle entrée';
-    $('#entry-modal-hint').textContent = isImport ? `Détecté depuis « ${ctx.file.name} » — vérifie et corrige si besoin.` : '';
+    $('#entry-modal-title').textContent = isEdit
+      ? 'Modifier l’entrée'
+      : isImageImport
+        ? 'Recopie les infos de l’image'
+        : isImport
+          ? 'Confirme les infos détectées'
+          : 'Nouvelle entrée';
+    $('#entry-modal-hint').textContent = isImageImport
+      ? `Aucune extraction automatique sur les images — recopie depuis « ${ctx.file.name} » ci-dessous.`
+      : isImport
+        ? `Détecté depuis « ${ctx.file.name} » — vérifie et corrige si besoin.`
+        : '';
+
+    clearImagePreview();
+    if (isImageImport) {
+      previewObjectUrl = URL.createObjectURL(ctx.file);
+      $('#entry-image-preview-img').src = previewObjectUrl;
+      $('#entry-image-preview').hidden = false;
+    }
 
     $('#entry-type').value = data.type || 'other';
     $('#entry-title').value = data.title || '';
@@ -334,6 +421,7 @@ import { VoyagheureParser } from './parser.js';
     $('#entry-start-time').value = data.startTime || '';
     $('#entry-end-date').value = data.endDate || '';
     $('#entry-place').value = data.place || '';
+    $('#entry-address').value = data.address || '';
     $('#entry-price').value = data.price === null || data.price === undefined ? '' : data.price;
     $('#entry-reference').value = data.reference || '';
     $('#entry-payment-status').value = data.paymentStatus || (isImport ? 'paid' : 'estimate');
@@ -341,6 +429,7 @@ import { VoyagheureParser } from './parser.js';
     const blob = isEdit ? ctx.existingEntry.pdfBlob : isImport ? ctx.file : null;
     const viewBtn = $('#entry-view-pdf');
     viewBtn.hidden = !blob;
+    viewBtn.textContent = attachmentViewLabel(blob);
     viewBtn.onclick = blob ? () => openBlobInNewTab(blob, (isEdit && ctx.existingEntry.pdfName) || ctx.file?.name || data.title) : null;
 
     $('#entry-delete').hidden = !isEdit;
@@ -350,7 +439,8 @@ import { VoyagheureParser } from './parser.js';
 
   function closeEntryModalAndContinueQueue() {
     hideModal('#entry-modal');
-    const wasImport = entryCtx && entryCtx.mode === 'import';
+    clearImagePreview();
+    const wasImport = entryCtx && isImportMode(entryCtx.mode);
     entryCtx = null;
     if (wasImport && importQueue.length > 0) {
       setTimeout(processNextImport, 180);
@@ -379,6 +469,7 @@ import { VoyagheureParser } from './parser.js';
       startTime: $('#entry-start-time').value || null,
       endDate: $('#entry-end-date').value || null,
       place: $('#entry-place').value.trim(),
+      address: $('#entry-address').value.trim(),
       price: $('#entry-price').value === '' ? null : Number($('#entry-price').value),
       reference: $('#entry-reference').value.trim(),
       paymentStatus: $('#entry-payment-status').value,
@@ -388,11 +479,12 @@ import { VoyagheureParser } from './parser.js';
     if (entryCtx.mode === 'edit') {
       await VoyagheureDB.updateEntry({ ...entryCtx.existingEntry, ...values });
     } else {
+      const attach = isImportMode(entryCtx.mode);
       await VoyagheureDB.createEntry({
         tripId: state.currentTrip.id,
         ...values,
-        pdfBlob: entryCtx.mode === 'import' ? entryCtx.file : null,
-        pdfName: entryCtx.mode === 'import' ? entryCtx.file.name : null,
+        pdfBlob: attach ? entryCtx.file : null,
+        pdfName: attach ? entryCtx.file.name : null,
       });
     }
 
@@ -433,10 +525,13 @@ import { VoyagheureParser } from './parser.js';
       itemsEl.className = 'timeline-items';
       items.forEach((entry) => {
         const meta = TYPE_META[entry.type] || TYPE_META.other;
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = `timeline-item type-${entry.type}`;
-        btn.innerHTML = `
+        const wrap = document.createElement('div');
+        wrap.className = `timeline-item type-${entry.type}`;
+
+        const openBtn = document.createElement('button');
+        openBtn.type = 'button';
+        openBtn.className = 'timeline-item__open';
+        openBtn.innerHTML = `
           <span class="timeline-item__icon" aria-hidden="true">${meta.icon}</span>
           <span>
             <p class="timeline-item__type">${meta.label}${entry.startTime ? ` · ${entry.startTime}` : ''}</p>
@@ -444,8 +539,23 @@ import { VoyagheureParser } from './parser.js';
             ${entry.place ? `<p class="timeline-item__time">${escapeHtml(entry.place)}</p>` : ''}
           </span>
         `;
-        btn.addEventListener('click', () => openEntryModal({ mode: 'edit', existingEntry: entry }));
-        itemsEl.appendChild(btn);
+        openBtn.addEventListener('click', () => openEntryModal({ mode: 'edit', existingEntry: entry }));
+        wrap.appendChild(openBtn);
+
+        if (entry.address) {
+          const mapBtn = document.createElement('button');
+          mapBtn.type = 'button';
+          mapBtn.className = 'timeline-item__map';
+          mapBtn.setAttribute('aria-label', `Itinéraire vers ${entry.address}`);
+          mapBtn.textContent = '📍';
+          mapBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openInMaps(entry.address);
+          });
+          wrap.appendChild(mapBtn);
+        }
+
+        itemsEl.appendChild(wrap);
       });
       dayEl.appendChild(itemsEl);
       container.appendChild(dayEl);

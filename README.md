@@ -46,11 +46,12 @@ dépense ajoutée à la main) :
 | `title` | Titre affiché |
 | `startDate`, `startTime` | Date et heure de début (optionnelles) |
 | `endDate` | Date de fin (optionnelle, ex. check-out d'un hôtel) |
-| `place` | Lieu |
+| `place` | Lieu (nom du venue/gare/hôtel) |
+| `address` | Adresse postale libre (rue, ville, code postal) — sert au bouton 📍 |
 | `price` | Montant en € (optionnel) |
 | `reference` | Référence / numéro de commande |
 | `paymentStatus` | `paid` (déjà payé) / `due` (à venir) / `estimate` (estimé) |
-| `pdfBlob` | Le PDF original (`Blob`), absent pour une entrée ajoutée à la main |
+| `pdfBlob` | Le fichier original (`Blob`, PDF **ou image**), absent pour une entrée ajoutée à la main |
 
 Le Planning et le Budget sont **entièrement dérivés** de ces entrées : aucune
 donnée de planning/budget n'est stockée séparément.
@@ -72,6 +73,9 @@ ne les fournit pas nativement) puis applique des heuristiques :
   contenant "total".
 - **Lieu** : recherche de libellés (lieu, adresse, départ, arrivée...) en
   écartant les candidats qui ressemblent à une date plutôt qu'à un lieu.
+- **Adresse** : recherche une ligne « code postal + ville » (`75012 Paris`,
+  `1013 AK Amsterdam`...) et la combine avec la ligne précédente si elle
+  ressemble à un nom de rue.
 - **Référence** : recherche de libellés (référence, commande, réservation,
   booking, confirmation...) suivis d'un code.
 
@@ -82,7 +86,34 @@ Ces heuristiques sont un pré-remplissage, pas une garantie — un PDF scanné
 formulaire reste alors éditable normalement.
 
 Le bouton **« Ajouter manuellement »** ouvre le même formulaire vide, pour
-les dépenses sans PDF (nourriture estimée, souvenirs...).
+les dépenses sans PDF ni photo (nourriture estimée, souvenirs...).
+
+### Import d'une image (PNG/JPG)
+
+Certains documents n'existent qu'en capture d'écran (ex. confirmation
+Hostelworld sans PDF). Le bouton d'import accepte indifféremment PDF et
+images (`accept="application/pdf,image/*"`) et détecte automatiquement le
+type de fichier sélectionné :
+
+- **PDF** → flux habituel (extraction + pré-remplissage automatique).
+- **Image** → pas d'extraction de texte : l'image s'affiche en grand
+  au-dessus d'un formulaire vide, pour recopier les infos rapidement sans
+  changer d'écran. L'image est stockée comme un PDF (même `pdfBlob` en
+  IndexedDB) et reste consultable ensuite via le bouton **« Voir
+  l'original »** sur la carte de l'entrée.
+
+### Géolocalisation — bouton 📍 « Y aller »
+
+Une entrée avec une **adresse** renseignée (détectée automatiquement ou
+saisie à la main) affiche un bouton 📍 sur sa carte (onglets Entrées et
+Planning). Il ouvre l'app de navigation du téléphone avec l'adresse
+pré-remplie, sans carte intégrée ni clé API :
+
+- iOS (détecté via `navigator.userAgent`) → `maps.apple.com` (ouvre Plans).
+- Android / autres → `google.com/maps/search` (ouvre Google Maps ou le
+  navigateur si l'app n'est pas installée).
+
+Aucune adresse renseignée → le bouton n'apparaît pas.
 
 ## Développement local
 

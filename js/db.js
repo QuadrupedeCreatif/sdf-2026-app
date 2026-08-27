@@ -136,6 +136,7 @@ async function createEntry(fields) {
     endDate: fields.endDate || null,
     endTime: fields.endTime || null,
     place: fields.place || '',
+    address: fields.address || '',
     price: fields.price === '' || fields.price === undefined ? null : Number(fields.price),
     reference: fields.reference || '',
     paymentStatus: fields.paymentStatus || 'estimate',

@@ -174,6 +174,32 @@ function detectPlace(text) {
 }
 
 // ---------------------------------------------------------------------
+// Détection de l'adresse
+// ---------------------------------------------------------------------
+/**
+ * Cherche une ligne "code postal + ville" (ex. "75012 Paris", "1013 AK
+ * Amsterdam") et la combine avec la ligne précédente si elle ressemble à un
+ * nom de rue (contient un numéro). Best-effort : sert juste à pré-remplir
+ * le champ adresse, toujours éditable ensuite.
+ */
+function detectAddress(text) {
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const postalCityRe = /^\d{4,5}\s?[A-Z]{0,2}\s+[A-ZÀ-Ü][\p{L}'-]+/u;
+  const noisyLabelRe = /total|prix|price|r[ée]f[ée]rence|commande|r[ée]servation|confirmation|booking|billet|ticket/i;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!postalCityRe.test(line)) continue;
+    // Retire un éventuel libellé ("Adresse :", "Address:"...) au début de la
+    // ligne précédente avant de l'utiliser comme nom de rue.
+    const prev = (lines[i - 1] || '').replace(/^(?:adresse|address)\s*[:\-]\s*/i, '').trim();
+    const looksLikeStreet = /\d/.test(prev) && prev.length < 60 && !noisyLabelRe.test(prev) && !postalCityRe.test(prev);
+    return looksLikeStreet ? `${prev}, ${line}` : line;
+  }
+  return '';
+}
+
+// ---------------------------------------------------------------------
 // Détection de la référence / numéro de commande
 // ---------------------------------------------------------------------
 function detectReference(text) {
@@ -211,6 +237,7 @@ async function analyzePdf(file) {
     startTime: null,
     endDate: null,
     place: '',
+    address: '',
     price: null,
     reference: '',
   };
@@ -232,9 +259,10 @@ async function analyzePdf(file) {
     startTime: detectTime(text),
     endDate: dates.length > 1 ? dates[dates.length - 1] : null,
     place: detectPlace(text),
+    address: detectAddress(text),
     price: detectPrice(text),
     reference: detectReference(text),
   };
 }
 
-export const VoyagheureParser = { analyzePdf, extractPdfText };
+export const VoyagheureParser = { analyzePdf, extractPdfText, titleFromFilename };
