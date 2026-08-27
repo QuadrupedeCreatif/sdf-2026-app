@@ -28,6 +28,10 @@ jobs:
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
+        with:
+          # Active automatiquement "Pages: source = GitHub Actions" au
+          # premier run, sans étape manuelle dans les Settings du repo.
+          enablement: true
 
       - name: Upload site as Pages artifact
         uses: actions/upload-pages-artifact@v3
