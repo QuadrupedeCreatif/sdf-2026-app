@@ -99,8 +99,8 @@ Heuristiques appliquées :
   date trouvée devient la date de début, la dernière (si différente) la
   date de fin.
 - **Heure** : formats `14:30` ou `14h30`.
-- **Prix** : `24,00 €`, `€ 24,00`, `24,00 EUR`, en priorité sur une ligne
-  contenant "Total"/"Prix"/"Montant" — un montant labellisé
+- **Prix** : `24,00 €`, `€ 24,00`, `24,00 EUR`, `99,50 Euro`, en priorité sur
+  une ligne contenant "Total"/"Prix"/"Montant" — un montant labellisé
   "sous-total"/"partiel" passe après les autres par défaut. (Le symbole `€`
   n'est pas une "frontière de mot" : le regex utilise une négation
   explicite plutôt que `\b` pour ne pas rater un montant en toute fin de
@@ -110,8 +110,10 @@ Heuristiques appliquées :
 - **Adresse** : une ligne « code postal + ville » (`75012 Paris`,
   `1013 AK Amsterdam`...) combinée à la ligne précédente si elle ressemble
   à un nom de rue.
-- **Référence** : libellés référence/commande/réservation/booking/
-  confirmation suivis d'un code.
+- **Référence** : libellés référence/commande/réservation/booking/ticket
+  id/confirmation, soit suivis d'un code sur la même ligne, soit — mise en
+  page en colonnes où le libellé et le code sont sur deux lignes séparées —
+  une ligne entièrement dédiée au code juste en dessous.
 
 Le formulaire de confirmation est **toujours** pré-rempli avec ces valeurs :
 l'utilisateur valide ou corrige, il ne saisit jamais un billet depuis zéro.
@@ -148,21 +150,38 @@ les dépenses sans PDF ni photo (nourriture estimée, souvenirs...).
 Certains billets couvrent **plusieurs événements distincts avec le même QR
 code/code-barres** — typiquement un pass festival multi-jours. Pendant
 l'extraction, `js/parser.js` détecte la répétition d'un motif "en-tête jour
-de la semaine (Ven./Sam./Mon.../Ven. 28 août...) suivi d'un libellé
-Starts/Location + adresse" — un bloc par occurrence :
+de la semaine (Ven./Sam./Mon.../Ven. 28 août/Thursday:...) suivi d'un
+libellé Starts/Location + adresse" — un bloc par occurrence :
 
 - **Un seul bloc détecté** (ou aucun) → comportement inchangé, import
   classique d'une entrée unique.
 - **Plusieurs blocs détectés** → la confirmation d'import bascule sur un
-  écran dédié : la **liste des événements détectés** (titre, jour, heure,
-  lieu, adresse), modifiable un par un, plus **un seul** champ de prix et
-  **une seule** référence pour l'ensemble du billet (jamais demandés événement
-  par événement).
+  écran dédié : un **titre partagé** pré-rempli depuis le texte du document
+  (pas le nom de fichier, qui peut avoir perdu apostrophes/esperluettes lors
+  de l'enregistrement du téléchargement), la **liste des événements
+  détectés** (titre, jour, heure, lieu, adresse), modifiable un par un, plus
+  **un seul** champ de prix et **une seule** référence pour l'ensemble du
+  billet (jamais demandés événement par événement).
+
+Mise en page en colonnes (ex. Jeudi/Vendredi à gauche, Samedi/Dimanche à
+droite dans le PDF) : comme le texte de deux colonnes voisines en hauteur se
+retrouve entrelacé dans l'ordre d'extraction de pdf.js, les lignes sont
+d'abord regroupées par colonne (proximité horizontale) puis chaque bloc est
+découpé à l'intérieur de sa colonne — un découpage linéaire naïf mélangerait
+sinon des lignes de deux événements différents. Gère aussi bien un lieu
+étalé sur plusieurs lignes sous un libellé "Location:" qu'une mise en page
+compacte sans libellé (ancrage sur la ligne "code postal + ville", le lieu
+étant celle juste au-dessus) ; l'heure accepte le format 24h ("17:30") et le
+format 12h anglophone ("5PM", "11:30pm"). Quand un bloc ne porte qu'un nom de
+jour (pas de date explicite), Voyag'heure la resitue dans la période globale
+du document si elle est indiquée quelque part sous la forme "date - date"
+(ex. "Datum: 29.08.2024 - 01.09.2024" → "Thursday" devient 2024-08-29).
 
 À la validation, Voyag'heure crée **un document partagé** (`documents`,
-avec le PDF, le prix total, la référence et le statut de paiement) puis
-**une entrée par événement** détecté, chacune pointant vers ce document via
-son `documentId` — son propre prix/référence/statut/PDF restent `null`.
+avec un titre, le PDF, le prix total, la référence et le statut de
+paiement) puis **une entrée par événement** détecté, chacune pointant vers
+ce document via son `documentId` — son propre prix/référence/statut/PDF
+restent `null`.
 
 Effets sur le reste de l'app :
 

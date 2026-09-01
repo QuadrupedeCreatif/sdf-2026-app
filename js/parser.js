@@ -302,7 +302,7 @@ function extractPrice(text) {
   // en toute fin de ligne) — bug réel qui faisait échouer la détection du
   // prix sur la plupart des tickets.
   const m =
-    /(\d{1,4}[.,]\d{2})\s?(?:€|EUR)(?!\w)/i.exec(text) || /(?:€|EUR)\s?(\d{1,4}[.,]\d{2})(?!\w)/i.exec(text);
+    /(\d{1,4}[.,]\d{2})\s?(?:€|EUR|Euro)(?!\w)/i.exec(text) || /(?:€|EUR|Euro)\s?(\d{1,4}[.,]\d{2})(?!\w)/i.exec(text);
   if (!m) return null;
   const value = parseFloat(m[1].replace(',', '.'));
   return Number.isFinite(value) ? { value, matchedText: m[0] } : null;
@@ -331,12 +331,19 @@ function findPriceCandidates(allLines) {
 // ---------------------------------------------------------------------
 // Référence / numéro de commande
 // ---------------------------------------------------------------------
-const REFERENCE_LABELS = /r[ée]f(?:[ée]rence)?|commande|r[ée]servation|order\s*(?:number|id)?|booking\s*(?:number|id)?|confirmation/i;
+const REFERENCE_LABELS =
+  /r[ée]f(?:[ée]rence)?|commande|r[ée]servation|order\s*(?:number|id)?|booking\s*(?:number|id)?|ticket\s*(?:number|id)|confirmation/i;
 
 function extractReference(text) {
   const m = /(?:[:#]|n°)\s*([A-Z0-9][A-Z0-9-]{3,19})\b/.exec(text);
-  if (!m) return null;
-  return { value: m[1], matchedText: m[0] };
+  if (m) return { value: m[1], matchedText: m[0] };
+  // Libellé et valeur sur deux lignes séparées (mise en page en colonnes) :
+  // la ligne de la valeur n'a alors aucun séparateur à chercher, elle EST
+  // le code — on ne l'accepte que si elle ne contient rien d'autre, pour
+  // ne jamais happer un bout de phrase par erreur.
+  const bare = text.trim();
+  if (/^[A-Z0-9][A-Z0-9-]{3,19}$/.test(bare)) return { value: bare, matchedText: bare };
+  return null;
 }
 
 function findReferenceCandidates(allLines) {
@@ -386,49 +393,57 @@ function findAddressCandidates(allLines) {
 // équivalent FR) apparaît dans les lignes qui suivent, pour éviter de
 // confondre un mot court isolé ("mon" en français...) avec un vrai
 // en-tête de bloc.
+//
+// Mise en page en colonnes (ex. Jeudi/Vendredi à gauche, Samedi/Dimanche à
+// droite) : `extractPdfLines` trie déjà les lignes par y décroissant, mais
+// deux lignes de colonnes différentes à des hauteurs voisines se
+// retrouvent entrelacées dans `allLines` — un simple découpage "du bloc N
+// au bloc N+1" mélangerait alors les deux colonnes. On regroupe donc
+// d'abord les lignes par colonne (proximité de x0) et on découpe chaque
+// bloc à l'intérieur de SA colonne uniquement.
 const WEEKDAYS = [
   'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche',
   'lun', 'mar', 'mer', 'jeu', 'ven', 'sam', 'dim',
   'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
   'mon', 'tue', 'tues', 'wed', 'thu', 'thur', 'thurs', 'fri', 'sat', 'sun',
 ];
-const WEEKDAY_LINE_RE = new RegExp(`^(${WEEKDAYS.join('|')})\\.?,?\\s`, 'i');
+// Frontière de mot plutôt que "point/virgule + espace obligatoire" : gère
+// aussi bien "Ven. 28 août" que "Thursday:" (rien après le libellé sur sa
+// propre ligne, deux-points collé au mot).
+const WEEKDAY_LINE_RE = new RegExp(`^(${WEEKDAYS.join('|')})\\b`, 'i');
 const BLOCK_SIGNAL_RE = /\b(starts?|d[ée]but|heure|location|lieu)\b/i;
 const BLOCK_TIME_LABELS = /starts?|d[ée]but|heure/i;
 const BLOCK_LOCATION_LABELS = /location|lieu/i;
+// Code postal + ville n'importe où dans la ligne (pas seulement en tête) :
+// sert à repérer sans ambiguïté la ligne d'adresse d'un bloc, y compris
+// dans une mise en page compacte "Rue, Code postal Ville" sur une ligne.
+const BLOCK_POSTAL_RE = /\b\d{4,5}\s?[A-Z]{0,2}\s+[A-ZÀ-Ü][\p{L}'-]+/u;
+const COLUMN_TOLERANCE = 20; // pt — deux lignes à moins de ça en x0 = même colonne
+const MAX_BLOCK_LINE_GAP = 30; // pt — au-delà, on sort du bloc (fin de section)
+
+const WEEKDAY_JS_INDEX = {
+  dimanche: 0, dim: 0, sunday: 0, sun: 0,
+  lundi: 1, lun: 1, monday: 1, mon: 1,
+  mardi: 2, mar: 2, tuesday: 2, tue: 2, tues: 2,
+  mercredi: 3, mer: 3, wednesday: 3, wed: 3,
+  jeudi: 4, jeu: 4, thursday: 4, thu: 4, thur: 4, thurs: 4,
+  vendredi: 5, ven: 5, friday: 5, fri: 5,
+  samedi: 6, sam: 6, saturday: 6, sat: 6,
+};
 
 function extractBlockTime(text) {
-  const m = /\b([01]?\d|2[0-3])[:hH]([0-5]\d)\b/.exec(text);
-  return m ? { value: `${pad2(Number(m[1]))}:${m[2]}` } : null;
-}
-
-function extractBlockLocation(text) {
-  const cleaned = text.replace(/^\s*[:\-]\s*/, '').trim();
-  return cleaned ? { value: cleaned } : null;
-}
-
-/** Sépare "Venue, Rue, Code postal Ville" en { place, address } — le lieu est
- *  le premier segment, l'adresse le reste si un code postal y apparaît. */
-function splitLocationLine(text) {
-  const trimmed = text.trim();
-  const parts = trimmed.split(',').map((p) => p.trim()).filter(Boolean);
-  if (parts.length <= 1) return { place: trimmed, address: '' };
-  const hasPostal = parts.some((p) => POSTAL_CITY_RE.test(p));
-  return { place: parts[0], address: hasPostal ? parts.slice(1).join(', ') : '' };
-}
-
-function findBlockStarts(allLines) {
-  const starts = [];
-  allLines.forEach((line, idx) => {
-    if (!WEEKDAY_LINE_RE.test(line.text)) return;
-    const windowText = allLines
-      .slice(idx, idx + 6)
-      .filter((l) => l.page === line.page)
-      .map((l) => l.text)
-      .join(' ');
-    if (BLOCK_SIGNAL_RE.test(windowText)) starts.push(idx);
-  });
-  return starts;
+  // 24h "17:30" / "17h30"
+  let m = /\b([01]?\d|2[0-3])[:hH]([0-5]\d)\b/.exec(text);
+  if (m) return { value: `${pad2(Number(m[1]))}:${m[2]}` };
+  // 12h "5PM", "11 PM", "4:30pm" — répandu sur les billets anglophones,
+  // souvent sans minutes du tout.
+  m = /\b(1[0-2]|0?[1-9])(?:[:.]([0-5]\d))?\s?([AaPp])\.?[Mm]\.?\b/.exec(text);
+  if (m) {
+    let hour = Number(m[1]) % 12;
+    if (/p/i.test(m[3])) hour += 12;
+    return { value: `${pad2(hour)}:${m[2] || '00'}` };
+  }
+  return null;
 }
 
 function datesInLines(lines) {
@@ -454,42 +469,204 @@ function datesInLines(lines) {
   return found;
 }
 
+/** Un seul jeton date : "29.08.2024" (numérique) ou "28 août 2026" (littéral). */
+function parseSingleDateToken(text) {
+  let m = /^(\d{1,2})[.\/](\d{1,2})[.\/](\d{2,4})$/.exec(text.trim());
+  if (m) {
+    let [, d, mo, y] = m;
+    if (y.length === 2) y = `20${y}`;
+    return `${y}-${pad2(Number(mo))}-${pad2(Number(d))}`;
+  }
+  m = new RegExp(`^(\\d{1,2})\\s+(${MONTH_NAMES_RE})\\.?\\s*(\\d{4})?$`, 'i').exec(text.trim());
+  if (m) {
+    const day = Number(m[1]);
+    const month = MONTHS[m[2].toLowerCase()];
+    const year = m[3] || String(new Date().getFullYear());
+    return `${year}-${month}-${pad2(day)}`;
+  }
+  return null;
+}
+
+/** Cherche une ligne "date - date" (ex. "Datum: 29.08.2024 - 01.09.2024") —
+ *  sert à retrouver la vraie date d'un bloc qui ne porte qu'un nom de jour
+ *  de la semaine ("Thursday:"), en le resituant dans cette période. */
+function findDateRangeOnSameLine(allLines) {
+  const rangeRe = /(\d{1,2}[.\/]\d{1,2}[.\/]\d{2,4})\s*[-–—]\s*(\d{1,2}[.\/]\d{1,2}[.\/]\d{2,4})/;
+  for (const line of allLines) {
+    const m = rangeRe.exec(line.text);
+    if (!m) continue;
+    const start = parseSingleDateToken(m[1]);
+    const end = parseSingleDateToken(m[2]);
+    if (start && end) return { start, end };
+  }
+  return null;
+}
+
+function weekdayIndexFromHeaderText(text) {
+  const m = WEEKDAY_LINE_RE.exec(text);
+  if (!m) return null;
+  return WEEKDAY_JS_INDEX[m[1].toLowerCase()] ?? null;
+}
+
+/** Premier jour de `range` dont le jour de la semaine correspond — ex. un
+ *  bloc "Friday:" dans une période 29.08-01.09.2024 devient 2024-08-30. */
+function resolveDateFromWeekday(weekdayIndex, range) {
+  if (weekdayIndex === null || weekdayIndex === undefined || !range) return null;
+  const start = new Date(`${range.start}T00:00:00`);
+  const end = new Date(`${range.end}T00:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    if (d.getDay() === weekdayIndex) {
+      return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    }
+  }
+  return null; // ce jour de la semaine n'apparaît pas dans la période donnée
+}
+
+/** Regroupe les lignes par colonne visuelle (proximité de x0), en
+ *  conservant pour chacune l'ordre haut→bas déjà établi par extractPdfLines. */
+function groupLinesByColumn(allLines) {
+  const columns = [];
+  allLines.forEach((line) => {
+    let col = columns.find((c) => Math.abs(c.x0 - line.x0) <= COLUMN_TOLERANCE);
+    if (!col) {
+      col = { x0: line.x0, lines: [] };
+      columns.push(col);
+    }
+    col.lines.push(line);
+  });
+  return columns;
+}
+
+/**
+ * Lieu/adresse d'un bloc. Deux mises en page rencontrées sur de vrais
+ * billets :
+ *  - avec libellé ("Location:") : tout ce qui suit jusqu'à "Starts:" —
+ *    gère aussi bien "Venue" seul que "Venue / Rue / Code postal Ville"
+ *    étalé sur plusieurs lignes.
+ *  - sans libellé (mise en page compacte, colonne de droite d'un billet
+ *    en 2 colonnes par ex.) : on s'ancre sur la ligne "code postal +
+ *    ville" — repérable sans ambiguïté — le lieu est la ligne juste
+ *    au-dessus, quel que soit le nombre de lignes de titre/sous-titre qui
+ *    précèdent.
+ */
+function extractBlockPlaceAddress(blockLines) {
+  const labelIdx = blockLines.findIndex((l) => BLOCK_LOCATION_LABELS.test(l.text));
+  if (labelIdx !== -1) {
+    // Le libellé lieu peut apparaître avant OU après le libellé heure selon
+    // le billet (les deux ordres existent en pratique) : la zone
+    // lieu/adresse s'arrête à la prochaine ligne "Starts/Début" qui suit le
+    // libellé lieu, si elle existe, sinon à la fin du bloc.
+    let zoneEnd = blockLines.length;
+    for (let i = labelIdx + 1; i < blockLines.length; i++) {
+      if (BLOCK_TIME_LABELS.test(blockLines[i].text)) {
+        zoneEnd = i;
+        break;
+      }
+    }
+    // La valeur peut être sur la même ligne que le libellé ("Location:
+    // Venue, Rue, Code postal Ville" en une ligne) ou sur les lignes
+    // suivantes (une par composant : venue / rue / code postal ville) —
+    // on regroupe les deux avant de découper.
+    const inline = blockLines[labelIdx].text
+      .replace(BLOCK_LOCATION_LABELS, '')
+      .replace(/^\s*[:\-]\s*/, '')
+      .trim();
+    const zone = [inline, ...blockLines.slice(labelIdx + 1, zoneEnd).map((l) => l.text)].filter(Boolean);
+    if (zone.length === 0) return { place: '', address: '' };
+    if (zone[0].includes(',')) {
+      const parts = zone[0].split(',').map((p) => p.trim()).filter(Boolean);
+      return { place: parts[0], address: [...parts.slice(1), ...zone.slice(1)].join(', ') };
+    }
+    return { place: zone[0], address: zone.slice(1).join(', ') };
+  }
+
+  const postalIdx = blockLines.findIndex((l) => BLOCK_POSTAL_RE.test(l.text));
+  if (postalIdx > 0) {
+    return { place: blockLines[postalIdx - 1].text, address: blockLines[postalIdx].text };
+  }
+  return { place: '', address: '' };
+}
+
 /**
  * Détecte plusieurs blocs événement dans un même document (billet
- * combiné). Renvoie `null` si un seul bloc (ou aucun) n'est trouvé — dans
- * ce cas le comportement d'import reste celui d'une entrée classique.
+ * combiné), colonne par colonne. Renvoie `null` si moins de 2 blocs
+ * valides sont trouvés — dans ce cas le comportement d'import reste celui
+ * d'une entrée classique.
  */
 function detectEventBlocks(allLines) {
-  const starts = findBlockStarts(allLines);
-  if (starts.length < 2) return null;
+  const columns = groupLinesByColumn(allLines);
+  const dateRange = findDateRangeOnSameLine(allLines);
+  const blocks = [];
 
-  return starts.map((startIdx, i) => {
-    const endIdx = i + 1 < starts.length ? starts[i + 1] : allLines.length;
-    const blockLines = allLines.slice(startIdx, endIdx);
+  columns.forEach((col) => {
+    const lines = col.lines; // déjà triées haut→bas (allLines l'est globalement)
+    const headerIdxs = [];
+    lines.forEach((line, i) => {
+      if (WEEKDAY_LINE_RE.test(line.text)) headerIdxs.push(i);
+    });
 
-    const dates = datesInLines(blockLines);
-    const timeCandidates = findLabeledCandidates(blockLines, BLOCK_TIME_LABELS, extractBlockTime, { searchNextLines: 1 });
-    const startTime = timeCandidates[0]?.value || null;
+    headerIdxs.forEach((hIdx, k) => {
+      const nextHIdx = k + 1 < headerIdxs.length ? headerIdxs[k + 1] : lines.length;
+      // Dans la colonne, on avance tant qu'on reste sur des lignes
+      // rapprochées (même bloc) — un grand saut vertical signale qu'on est
+      // sorti dans une autre section (utile seulement pour le DERNIER
+      // bloc d'une colonne, qui n'a pas de bloc suivant pour le borner).
+      let endIdx = hIdx + 1;
+      while (endIdx < nextHIdx) {
+        if (lines[endIdx - 1].y - lines[endIdx].y > MAX_BLOCK_LINE_GAP) break;
+        endIdx++;
+      }
+      const blockLines = lines.slice(hIdx, endIdx);
 
-    const locationCandidates = findLabeledCandidates(blockLines, BLOCK_LOCATION_LABELS, extractBlockLocation, { searchNextLines: 1 });
-    const { place, address } = locationCandidates[0] ? splitLocationLine(locationCandidates[0].value) : { place: '', address: '' };
+      const windowText = blockLines.map((l) => l.text).join(' ');
+      if (!BLOCK_SIGNAL_RE.test(windowText)) return; // pas un vrai en-tête de bloc
 
-    // Titre : première ligne "libre" (ni l'en-tête jour, ni un label
-    // Starts/Location) entre le début du bloc et le premier de ces labels.
-    const labelIdx = blockLines.findIndex((l) => BLOCK_TIME_LABELS.test(l.text) || BLOCK_LOCATION_LABELS.test(l.text));
-    const titleZone = blockLines.slice(1, labelIdx === -1 ? blockLines.length : labelIdx);
-    const titleLine = titleZone.find((l) => l.text.length > 2 && l.text.length < 80);
+      const timeIdx = blockLines.findIndex((l) => BLOCK_TIME_LABELS.test(l.text));
+      const startTime = blockLines[timeIdx] ? extractBlockTime(blockLines[timeIdx].text)?.value || null : null;
+      const { place, address } = extractBlockPlaceAddress(blockLines);
 
-    return {
-      type: 'event',
-      title: titleLine ? titleLine.text : `Événement ${i + 1}`,
-      startDate: dates[0] || null,
-      startTime,
-      endTime: null,
-      place,
-      address,
-    };
+      // Titre : première ligne "libre" entre l'en-tête et le premier des
+      // deux labels heure/lieu, quel que soit leur ordre respectif (les
+      // deux ordres existent en pratique selon le billet).
+      const locationLabelIdx = blockLines.findIndex((l) => BLOCK_LOCATION_LABELS.test(l.text));
+      const labelIdxs = [timeIdx, locationLabelIdx].filter((i) => i !== -1);
+      const titleZoneEnd = labelIdxs.length > 0 ? Math.min(...labelIdxs) : blockLines.length;
+      const titleLine = blockLines.slice(1, titleZoneEnd).find((l) => l.text.length > 2 && l.text.length < 80);
+
+      const explicitDate = datesInLines(blockLines)[0] || null;
+      const startDate = explicitDate || resolveDateFromWeekday(weekdayIndexFromHeaderText(blockLines[0].text), dateRange);
+
+      blocks.push({
+        type: 'event',
+        title: titleLine ? titleLine.text : blockLines[0].text.replace(/[:.,]\s*$/, ''),
+        startDate,
+        startTime,
+        endTime: null,
+        place,
+        address,
+        _sortY: blockLines[0].y,
+        _sortX: col.x0,
+      });
+    });
   });
+
+  if (blocks.length < 2) return null;
+
+  // Ordre chronologique si toutes les dates sont connues (plus utile pour
+  // l'utilisateur qui valide) ; sinon ordre visuel haut→bas, colonne par
+  // colonne, plutôt qu'un ordre arbitraire.
+  const allDated = blocks.every((b) => b.startDate);
+  blocks.sort((a, b) => {
+    if (allDated) return `${a.startDate}${a.startTime || ''}`.localeCompare(`${b.startDate}${b.startTime || ''}`);
+    return b._sortY - a._sortY || a._sortX - b._sortX;
+  });
+  blocks.forEach((b) => {
+    delete b._sortY;
+    delete b._sortX;
+  });
+
+  return blocks;
 }
 
 // ---------------------------------------------------------------------
@@ -504,6 +681,25 @@ function titleFromFilename(name) {
     .trim();
 }
 
+// Étiquettes qui ne sont jamais le titre du document (champs de métadonnées
+// habituels en haut d'un billet), à écarter lors de la recherche du titre.
+const DOCUMENT_TITLE_NOISE_RE = /^(ticket:?|booking|datum|price:?|purchase date|ticket id|barcode|scan here|legal notice)\b/i;
+
+/**
+ * Titre du document tel qu'il apparaît réellement dans le PDF (première
+ * ligne "substantielle" du texte), plutôt que le nom de fichier — qui peut
+ * avoir perdu apostrophes/esperluettes lors de l'enregistrement du
+ * téléchargement (ex. "Party's" -> "Party_s" -> "Party s"). Sert de nom à
+ * un billet combiné (plusieurs événements, un seul document). Se rabat sur
+ * le nom de fichier si aucune ligne de titre plausible n'est trouvée.
+ */
+function extractDocumentTitle(allLines, fallbackName) {
+  const candidate = allLines.find(
+    (l) => l.text.length >= 8 && l.text.length <= 120 && !DOCUMENT_TITLE_NOISE_RE.test(l.text) && !BLOCK_POSTAL_RE.test(l.text)
+  );
+  return candidate ? candidate.text : titleFromFilename(fallbackName);
+}
+
 function emptyField() {
   return { value: null, snippet: null, confidence: false };
 }
@@ -512,6 +708,7 @@ function emptyAnalysis(file) {
   return {
     type: { value: 'event', snippet: null, confidence: false },
     title: titleFromFilename(file.name),
+    documentTitle: titleFromFilename(file.name),
     startDate: emptyField(),
     startTime: emptyField(),
     endDate: emptyField(),
@@ -579,6 +776,7 @@ async function analyzePdf(file) {
   return {
     type: typeField,
     title: base.title,
+    documentTitle: extractDocumentTitle(allLines, file.name),
     startDate,
     startTime,
     endDate,

@@ -490,14 +490,18 @@ import { VoyagheureReminders } from './reminders.js';
     const openBtn = document.createElement('button');
     openBtn.type = 'button';
     openBtn.className = 'doc-card__open';
-    const metaBits = [`${sorted.length} événements`, doc.price != null ? `${formatAmount(doc.price)} €` : null].filter(Boolean);
+    const metaBits = [
+      'Billet combiné',
+      `${sorted.length} événements`,
+      doc.price != null ? `${formatAmount(doc.price)} €` : null,
+    ].filter(Boolean);
     const subtitle = sorted
       .map((e) => `${escapeHtml(e.title)}${e.startDate ? ` (${formatDateShort(e.startDate)})` : ''}`)
       .join(' · ');
     openBtn.innerHTML = `
       <span class="doc-card__icon" aria-hidden="true">🎫</span>
       <span class="doc-card__body">
-        <span class="doc-card__name">Billet combiné</span>
+        <span class="doc-card__name">${escapeHtml(doc.title || 'Billet combiné')}</span>
         <div class="doc-card__meta">${escapeHtml(metaBits.join(' · '))}</div>
         <div class="doc-card__combined-events">${subtitle}</div>
       </span>
@@ -583,6 +587,7 @@ import { VoyagheureReminders } from './reminders.js';
       openCombinedModal({
         file,
         events: parsed.blocks.map((b) => ({ ...b })),
+        title: parsed.documentTitle,
         price: fieldValue(parsed.price),
         reference: fieldValue(parsed.reference),
       });
@@ -793,10 +798,11 @@ import { VoyagheureReminders } from './reminders.js';
     return { type: 'event', title: '', startDate: null, startTime: null, endTime: null, place: '', address: '' };
   }
 
-  function openCombinedModal({ file, events, price, reference }) {
+  function openCombinedModal({ file, events, title, price, reference }) {
     combinedCtx = { file, events: events.length > 0 ? events : [blankCombinedEvent()] };
     $('#combined-modal-hint').textContent =
       `${combinedCtx.events.length} événements détectés depuis « ${file.name} » — vérifie/corrige chacun ci-dessous.`;
+    $('#combined-title').value = title || file.name;
     $('#combined-price').value = price === null || price === undefined ? '' : price;
     $('#combined-reference').value = reference || '';
     $('#combined-payment-status').value = 'paid';
@@ -889,6 +895,7 @@ import { VoyagheureReminders } from './reminders.js';
 
     const doc = await VoyagheureDB.createDocument({
       tripId: state.currentTrip.id,
+      title: $('#combined-title').value.trim() || 'Billet combiné',
       pdfBlob: combinedCtx.file,
       pdfName: combinedCtx.file.name,
       price: $('#combined-price').value === '' ? null : Number($('#combined-price').value),
@@ -931,6 +938,7 @@ import { VoyagheureReminders } from './reminders.js';
       })
       .join('');
 
+    $('#document-title').value = doc.title || 'Billet combiné';
     $('#document-price').value = doc.price === null || doc.price === undefined ? '' : doc.price;
     $('#document-reference').value = doc.reference || '';
     $('#document-payment-status').value = doc.paymentStatus || 'estimate';
@@ -963,6 +971,7 @@ import { VoyagheureReminders } from './reminders.js';
     if (!documentCtx) return;
     await VoyagheureDB.updateDocument({
       ...documentCtx.doc,
+      title: $('#document-title').value.trim() || 'Billet combiné',
       price: $('#document-price').value === '' ? null : Number($('#document-price').value),
       reference: $('#document-reference').value.trim(),
       paymentStatus: $('#document-payment-status').value,

@@ -262,6 +262,9 @@ async function createDocument(fields) {
   const doc = {
     id: makeId(),
     tripId: fields.tripId,
+    // Titre affiché sur la carte "Billet combiné" (onglet Entrées) — extrait
+    // du texte du PDF si possible, sinon du nom de fichier (voir js/parser.js).
+    title: fields.title || 'Billet combiné',
     pdfBlob: fields.pdfBlob || null,
     pdfName: fields.pdfName || null,
     price: fields.price === '' || fields.price === undefined ? null : Number(fields.price),
