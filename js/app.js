@@ -16,6 +16,38 @@ import { VoyagheureReminders } from './reminders.js';
 
   let importQueue = [];
   let entryCtx = null; // { mode: 'import'|'manual'|'edit', file?, parsed?, existingEntry? }
+  let combinedCtx = null; // { file, events: [{type,title,startDate,startTime,endTime,place,address}] }
+  let documentCtx = null; // { doc, linkedEntries } — édition d'un billet combiné existant
+
+  // Documents partagés (billets combinés) du voyage courant, indexés par id
+  // — repeuplé à chaque refreshAll(). Une entrée avec `documentId` va lire
+  // son prix/référence/statut/PDF ici plutôt que sur ses propres champs
+  // (qui restent null pour ce type d'entrée, voir js/db.js).
+  let docsById = new Map();
+
+  function docFor(entry) {
+    return entry.documentId ? docsById.get(entry.documentId) || null : null;
+  }
+  function effectivePrice(entry) {
+    const doc = docFor(entry);
+    return doc ? doc.price : entry.price;
+  }
+  function effectiveReference(entry) {
+    const doc = docFor(entry);
+    return doc ? doc.reference : entry.reference;
+  }
+  function effectivePaymentStatus(entry) {
+    const doc = docFor(entry);
+    return doc ? doc.paymentStatus : entry.paymentStatus;
+  }
+  function effectivePdfBlob(entry) {
+    const doc = docFor(entry);
+    return doc ? doc.pdfBlob : entry.pdfBlob;
+  }
+  function effectivePdfName(entry) {
+    const doc = docFor(entry);
+    return doc ? doc.pdfName : entry.pdfName;
+  }
 
   // ---------------------------------------------------------------------
   // Utils
@@ -91,8 +123,12 @@ import { VoyagheureReminders } from './reminders.js';
   /** Comportement partagé Documents/Planning : ouvre le PDF/image d'origine
    *  s'il y en a un (viewer natif du téléphone), sinon ouvre l'édition. */
   function openEntryAttachmentOrEdit(entry) {
-    if (entry.pdfBlob) {
-      openBlobInNewTab(entry.pdfBlob, entry.pdfName || entry.title);
+    // Une entrée issue d'un billet combiné n'a pas son propre PDF : elle
+    // pointe vers celui du document partagé (même PDF/QR pour tous les
+    // événements qu'il couvre).
+    const blob = effectivePdfBlob(entry);
+    if (blob) {
+      openBlobInNewTab(blob, effectivePdfName(entry) || entry.title);
     } else {
       openEntryModal({ mode: 'edit', existingEntry: entry });
     }
@@ -332,7 +368,11 @@ import { VoyagheureReminders } from './reminders.js';
 
   async function refreshAll() {
     if (!state.currentTrip) return;
-    const entries = await VoyagheureDB.getEntriesForTrip(state.currentTrip.id);
+    const [entries, documents] = await Promise.all([
+      VoyagheureDB.getEntriesForTrip(state.currentTrip.id),
+      VoyagheureDB.getDocumentsForTrip(state.currentTrip.id),
+    ]);
+    docsById = new Map(documents.map((doc) => [doc.id, doc]));
     renderEntries(entries);
     renderPlanning(entries);
     renderBudget(entries);
@@ -345,73 +385,155 @@ import { VoyagheureReminders } from './reminders.js';
   function renderEntries(entries) {
     const list = $('#entries-list');
     list.innerHTML = '';
-    const sorted = [...entries].sort((a, b) => b.addedAt - a.addedAt);
-    $('#entries-empty').hidden = sorted.length > 0;
 
-    sorted.forEach((entry) => {
-      const meta = TYPE_META[entry.type] || TYPE_META.other;
-      const li = document.createElement('li');
-      li.className = `doc-card type-${entry.type}`;
-
-      const openBtn = document.createElement('button');
-      openBtn.type = 'button';
-      openBtn.className = 'doc-card__open';
-      const metaBits = [
-        meta.label,
-        entry.startDate ? formatDateShort(entry.startDate) : null,
-        entry.price != null ? `${formatAmount(entry.price)} €` : null,
-      ].filter(Boolean);
-      openBtn.innerHTML = `
-        <span class="doc-card__icon" aria-hidden="true">${meta.icon}</span>
-        <span class="doc-card__body">
-          <span class="doc-card__name">${escapeHtml(entry.title)}</span>
-          <div class="doc-card__meta">${escapeHtml(metaBits.join(' · '))}</div>
-        </span>
-      `;
-      openBtn.addEventListener('click', () => openEntryAttachmentOrEdit(entry));
-
-      li.appendChild(openBtn);
-
-      if (entry.address) {
-        const mapBtn = document.createElement('button');
-        mapBtn.type = 'button';
-        mapBtn.className = 'doc-card__map';
-        mapBtn.setAttribute('aria-label', `Itinéraire vers ${entry.address}`);
-        mapBtn.textContent = '📍';
-        mapBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          openInMaps(entry.address);
-        });
-        li.appendChild(mapBtn);
-      }
-
-      const editBtn = document.createElement('button');
-      editBtn.type = 'button';
-      editBtn.className = 'doc-card__edit';
-      editBtn.setAttribute('aria-label', `Modifier ${entry.title}`);
-      editBtn.textContent = '✎';
-      editBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        openEntryModal({ mode: 'edit', existingEntry: entry });
+    // Une entrée issue d'un billet combiné (documentId renseigné) ne
+    // s'affiche pas comme une carte individuelle ici : toutes celles qui
+    // partagent le même document sont regroupées en UNE carte "billet
+    // combiné" (voir renderCombinedDocCard) — le PDF/QR est unique, pas
+    // besoin de le montrer une fois par événement.
+    const standalone = entries.filter((e) => !e.documentId);
+    const grouped = new Map(); // documentId -> entries[]
+    entries
+      .filter((e) => e.documentId)
+      .forEach((e) => {
+        if (!grouped.has(e.documentId)) grouped.set(e.documentId, []);
+        grouped.get(e.documentId).push(e);
       });
 
-      const deleteBtn = document.createElement('button');
-      deleteBtn.type = 'button';
-      deleteBtn.className = 'doc-card__delete';
-      deleteBtn.setAttribute('aria-label', `Supprimer ${entry.title}`);
-      deleteBtn.textContent = '✕';
-      deleteBtn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        if (confirm(`Supprimer "${entry.title}" ?`)) {
-          await VoyagheureDB.deleteEntry(entry.id);
-          refreshAll();
-        }
-      });
+    $('#entries-empty').hidden = standalone.length > 0 || grouped.size > 0;
 
-      li.appendChild(editBtn);
-      li.appendChild(deleteBtn);
-      list.appendChild(li);
+    const sortedStandalone = [...standalone].sort((a, b) => b.addedAt - a.addedAt);
+    sortedStandalone.forEach((entry) => renderEntryCard(list, entry));
+
+    Array.from(grouped.entries())
+      .sort((a, b) => (docsById.get(b[0])?.addedAt || 0) - (docsById.get(a[0])?.addedAt || 0))
+      .forEach(([documentId, linkedEntries]) => renderCombinedDocCard(list, documentId, linkedEntries));
+  }
+
+  function renderEntryCard(list, entry) {
+    const meta = TYPE_META[entry.type] || TYPE_META.other;
+    const li = document.createElement('li');
+    li.className = `doc-card type-${entry.type}`;
+
+    const openBtn = document.createElement('button');
+    openBtn.type = 'button';
+    openBtn.className = 'doc-card__open';
+    const metaBits = [
+      meta.label,
+      entry.startDate ? formatDateShort(entry.startDate) : null,
+      entry.price != null ? `${formatAmount(entry.price)} €` : null,
+    ].filter(Boolean);
+    openBtn.innerHTML = `
+      <span class="doc-card__icon" aria-hidden="true">${meta.icon}</span>
+      <span class="doc-card__body">
+        <span class="doc-card__name">${escapeHtml(entry.title)}</span>
+        <div class="doc-card__meta">${escapeHtml(metaBits.join(' · '))}</div>
+      </span>
+    `;
+    openBtn.addEventListener('click', () => openEntryAttachmentOrEdit(entry));
+
+    li.appendChild(openBtn);
+
+    if (entry.address) {
+      const mapBtn = document.createElement('button');
+      mapBtn.type = 'button';
+      mapBtn.className = 'doc-card__map';
+      mapBtn.setAttribute('aria-label', `Itinéraire vers ${entry.address}`);
+      mapBtn.textContent = '📍';
+      mapBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openInMaps(entry.address);
+      });
+      li.appendChild(mapBtn);
+    }
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'doc-card__edit';
+    editBtn.setAttribute('aria-label', `Modifier ${entry.title}`);
+    editBtn.textContent = '✎';
+    editBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openEntryModal({ mode: 'edit', existingEntry: entry });
     });
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'doc-card__delete';
+    deleteBtn.setAttribute('aria-label', `Supprimer ${entry.title}`);
+    deleteBtn.textContent = '✕';
+    deleteBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (confirm(`Supprimer "${entry.title}" ?`)) {
+        await VoyagheureDB.deleteEntry(entry.id);
+        refreshAll();
+      }
+    });
+
+    li.appendChild(editBtn);
+    li.appendChild(deleteBtn);
+    list.appendChild(li);
+  }
+
+  /** Carte unique pour un billet combiné : un PDF/QR/prix partagé par
+   *  plusieurs événements de planning, listés en sous-titre. */
+  function renderCombinedDocCard(list, documentId, linkedEntries) {
+    const doc = docsById.get(documentId);
+    if (!doc) return; // ne devrait pas arriver (document supprimé sans cascade)
+    const sorted = [...linkedEntries].sort((a, b) =>
+      `${a.startDate || ''}${a.startTime || ''}`.localeCompare(`${b.startDate || ''}${b.startTime || ''}`)
+    );
+
+    const li = document.createElement('li');
+    li.className = 'doc-card doc-card--combined';
+
+    const openBtn = document.createElement('button');
+    openBtn.type = 'button';
+    openBtn.className = 'doc-card__open';
+    const metaBits = [`${sorted.length} événements`, doc.price != null ? `${formatAmount(doc.price)} €` : null].filter(Boolean);
+    const subtitle = sorted
+      .map((e) => `${escapeHtml(e.title)}${e.startDate ? ` (${formatDateShort(e.startDate)})` : ''}`)
+      .join(' · ');
+    openBtn.innerHTML = `
+      <span class="doc-card__icon" aria-hidden="true">🎫</span>
+      <span class="doc-card__body">
+        <span class="doc-card__name">Billet combiné</span>
+        <div class="doc-card__meta">${escapeHtml(metaBits.join(' · '))}</div>
+        <div class="doc-card__combined-events">${subtitle}</div>
+      </span>
+    `;
+    openBtn.addEventListener('click', () => {
+      if (doc.pdfBlob) openBlobInNewTab(doc.pdfBlob, doc.pdfName || 'Billet combiné');
+      else openDocumentModal(doc, sorted);
+    });
+    li.appendChild(openBtn);
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'doc-card__edit';
+    editBtn.setAttribute('aria-label', 'Modifier le billet combiné');
+    editBtn.textContent = '✎';
+    editBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openDocumentModal(doc, sorted);
+    });
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'doc-card__delete';
+    deleteBtn.setAttribute('aria-label', 'Supprimer le billet combiné');
+    deleteBtn.textContent = '✕';
+    deleteBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (confirm(`Supprimer ce billet combiné et ses ${sorted.length} événements ?`)) {
+        await VoyagheureDB.deleteDocument(doc.id);
+        refreshAll();
+      }
+    });
+
+    li.appendChild(editBtn);
+    li.appendChild(deleteBtn);
+    list.appendChild(li);
   }
 
   function isSupportedImportFile(f) {
@@ -453,6 +575,20 @@ import { VoyagheureReminders } from './reminders.js';
       parsed = VoyagheureParser.emptyAnalysis(file);
     }
     $('#import-status').hidden = true;
+
+    // Billet combiné : plusieurs blocs événement détectés dans le même
+    // document (même PDF/QR/prix pour tous) — flux de confirmation dédié.
+    // Un seul bloc (ou aucun) : comportement inchangé, entrée classique.
+    if (parsed.blocks && parsed.blocks.length > 1) {
+      openCombinedModal({
+        file,
+        events: parsed.blocks.map((b) => ({ ...b })),
+        price: fieldValue(parsed.price),
+        reference: fieldValue(parsed.reference),
+      });
+      return;
+    }
+
     openEntryModal({ mode: 'import', file, parsed });
   }
 
@@ -477,6 +613,15 @@ import { VoyagheureReminders } from './reminders.js';
     const isImport = isImportMode(ctx.mode);
     const isImageImport = ctx.mode === 'import-image';
     const data = isEdit ? ctx.existingEntry : ctx.parsed || {};
+
+    // Une entrée d'un billet combiné n'a pas son propre prix/référence/
+    // statut : ces champs vivent sur le document partagé et se modifient
+    // depuis sa carte (onglet Entrées), pas ici — on les masque plutôt que
+    // de laisser croire qu'ils s'appliquent à ce seul événement.
+    const linkedDoc = isEdit ? docFor(ctx.existingEntry) : null;
+    $('#entry-price-reference-row').hidden = !!linkedDoc;
+    $('#entry-payment-status-field').hidden = !!linkedDoc;
+    $('#entry-document-note').hidden = !linkedDoc;
 
     $('#entry-modal-title').textContent = isEdit
       ? 'Modifier l’entrée'
@@ -503,8 +648,8 @@ import { VoyagheureReminders } from './reminders.js';
     const endDate = fieldValue(data.endDate);
     const place = fieldValue(data.place);
     const address = fieldValue(data.address);
-    const price = fieldValue(data.price);
-    const reference = fieldValue(data.reference);
+    const price = linkedDoc ? linkedDoc.price : fieldValue(data.price);
+    const reference = linkedDoc ? linkedDoc.reference : fieldValue(data.reference);
 
     $('#entry-type').value = fieldValue(data.type) || 'other';
     $('#entry-title').value = data.title || '';
@@ -516,7 +661,7 @@ import { VoyagheureReminders } from './reminders.js';
     $('#entry-address').value = address || '';
     $('#entry-price').value = price === null || price === undefined ? '' : price;
     $('#entry-reference').value = reference || '';
-    $('#entry-payment-status').value = data.paymentStatus || (isImport ? 'paid' : 'estimate');
+    $('#entry-payment-status').value = (linkedDoc ? linkedDoc.paymentStatus : data.paymentStatus) || (isImport ? 'paid' : 'estimate');
     $('#entry-reminder-mode').value = data.reminderMode || 'default';
     $('#entry-reminder-minutes').value = data.reminderMinutes === null || data.reminderMinutes === undefined ? '' : data.reminderMinutes;
     updateReminderCustomFieldVisibility();
@@ -525,11 +670,13 @@ import { VoyagheureReminders } from './reminders.js';
     // pertinent juste après un import (PDF ou image).
     applyFieldHints(isImport ? ctx.parsed : null);
 
-    const blob = isEdit ? ctx.existingEntry.pdfBlob : isImport ? ctx.file : null;
+    const blob = isEdit ? effectivePdfBlob(ctx.existingEntry) : isImport ? ctx.file : null;
     const viewBtn = $('#entry-view-pdf');
     viewBtn.hidden = !blob;
     viewBtn.textContent = attachmentViewLabel(blob);
-    viewBtn.onclick = blob ? () => openBlobInNewTab(blob, (isEdit && ctx.existingEntry.pdfName) || ctx.file?.name || data.title) : null;
+    viewBtn.onclick = blob
+      ? () => openBlobInNewTab(blob, (isEdit && effectivePdfName(ctx.existingEntry)) || ctx.file?.name || data.title)
+      : null;
 
     $('#entry-delete').hidden = !isEdit;
 
@@ -596,6 +743,8 @@ import { VoyagheureReminders } from './reminders.js';
     e.preventDefault();
     if (!entryCtx) return;
 
+    const linkedDoc = entryCtx.mode === 'edit' ? docFor(entryCtx.existingEntry) : null;
+
     const values = {
       type: $('#entry-type').value,
       title: $('#entry-title').value.trim(),
@@ -605,12 +754,17 @@ import { VoyagheureReminders } from './reminders.js';
       endTime: $('#entry-end-time').value || null,
       place: $('#entry-place').value.trim(),
       address: $('#entry-address').value.trim(),
-      price: $('#entry-price').value === '' ? null : Number($('#entry-price').value),
-      reference: $('#entry-reference').value.trim(),
-      paymentStatus: $('#entry-payment-status').value,
       reminderMode: $('#entry-reminder-mode').value,
       reminderMinutes: $('#entry-reminder-minutes').value === '' ? null : Number($('#entry-reminder-minutes').value),
     };
+    // Prix/référence/statut sont masqués (et non modifiables ici) pour une
+    // entrée d'un billet combiné — ne pas les écraser avec les champs
+    // cachés du formulaire, qui n'ont pas été édités.
+    if (!linkedDoc) {
+      values.price = $('#entry-price').value === '' ? null : Number($('#entry-price').value);
+      values.reference = $('#entry-reference').value.trim();
+      values.paymentStatus = $('#entry-payment-status').value;
+    }
     if (!values.title) return;
 
     await maybeLearnFromCorrection(entryCtx, values);
@@ -628,6 +782,193 @@ import { VoyagheureReminders } from './reminders.js';
     }
 
     closeEntryModalAndContinueQueue();
+    await refreshAll();
+  });
+
+  // ---------------------------------------------------------------------
+  // Billet combiné — confirmation d'import (plusieurs événements détectés
+  // dans un même PDF, partageant un seul prix/référence/QR)
+  // ---------------------------------------------------------------------
+  function blankCombinedEvent() {
+    return { type: 'event', title: '', startDate: null, startTime: null, endTime: null, place: '', address: '' };
+  }
+
+  function openCombinedModal({ file, events, price, reference }) {
+    combinedCtx = { file, events: events.length > 0 ? events : [blankCombinedEvent()] };
+    $('#combined-modal-hint').textContent =
+      `${combinedCtx.events.length} événements détectés depuis « ${file.name} » — vérifie/corrige chacun ci-dessous.`;
+    $('#combined-price').value = price === null || price === undefined ? '' : price;
+    $('#combined-reference').value = reference || '';
+    $('#combined-payment-status').value = 'paid';
+    renderCombinedEventsList();
+    showModal('#combined-modal');
+  }
+
+  function typeOptionsHtml(selected) {
+    return Object.entries(TYPE_META)
+      .map(([value, meta]) => `<option value="${value}" ${value === selected ? 'selected' : ''}>${meta.icon} ${escapeHtml(meta.label)}</option>`)
+      .join('');
+  }
+
+  function renderCombinedEventsList() {
+    const container = $('#combined-events-list');
+    container.innerHTML = combinedCtx.events
+      .map(
+        (ev, i) => `
+      <fieldset class="combined-event" data-index="${i}">
+        <div class="combined-event__header">
+          <span class="combined-event__number">Événement ${i + 1}</span>
+          <button type="button" class="combined-event__remove" aria-label="Retirer cet événement" ${combinedCtx.events.length <= 1 ? 'disabled' : ''}>✕</button>
+        </div>
+        <label class="field"><span>Titre</span><input type="text" class="ce-title" value="${escapeHtml(ev.title || '')}" /></label>
+        <label class="field">
+          <span>Type</span>
+          <select class="ce-type">${typeOptionsHtml(ev.type)}</select>
+        </label>
+        <div class="field-row">
+          <label class="field"><span>Date</span><input type="date" class="ce-start-date" value="${ev.startDate || ''}" /></label>
+          <label class="field"><span>Heure de début</span><input type="time" class="ce-start-time" value="${ev.startTime || ''}" /></label>
+        </div>
+        <div class="field-row">
+          <label class="field"><span>Heure de fin</span><input type="time" class="ce-end-time" value="${ev.endTime || ''}" /></label>
+          <label class="field"><span>Lieu</span><input type="text" class="ce-place" value="${escapeHtml(ev.place || '')}" /></label>
+        </div>
+        <label class="field"><span>Adresse</span><input type="text" class="ce-address" value="${escapeHtml(ev.address || '')}" /></label>
+      </fieldset>
+    `
+      )
+      .join('');
+
+    $$('.combined-event').forEach((fieldset) => {
+      const i = Number(fieldset.dataset.index);
+      const ev = combinedCtx.events[i];
+      const bind = (selector, field, parse = (v) => v) => {
+        fieldset.querySelector(selector).addEventListener('input', (e) => {
+          ev[field] = parse(e.target.value) || null;
+        });
+      };
+      bind('.ce-title', 'title');
+      fieldset.querySelector('.ce-type').addEventListener('change', (e) => {
+        ev.type = e.target.value;
+      });
+      bind('.ce-start-date', 'startDate');
+      bind('.ce-start-time', 'startTime');
+      bind('.ce-end-time', 'endTime');
+      bind('.ce-place', 'place');
+      bind('.ce-address', 'address');
+
+      fieldset.querySelector('.combined-event__remove').addEventListener('click', () => {
+        if (combinedCtx.events.length <= 1) return;
+        combinedCtx.events.splice(i, 1);
+        renderCombinedEventsList();
+      });
+    });
+  }
+
+  $('#combined-add-event').addEventListener('click', () => {
+    combinedCtx.events.push(blankCombinedEvent());
+    renderCombinedEventsList();
+  });
+
+  function closeCombinedModal() {
+    hideModal('#combined-modal');
+    combinedCtx = null;
+    if (importQueue.length > 0) setTimeout(processNextImport, 180);
+  }
+
+  $('#combined-cancel').addEventListener('click', closeCombinedModal);
+
+  $('#combined-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!combinedCtx) return;
+    const events = combinedCtx.events;
+    if (events.length === 0 || events.some((ev) => !ev.title || !ev.title.trim())) {
+      alert('Chaque événement doit avoir un titre.');
+      return;
+    }
+
+    const doc = await VoyagheureDB.createDocument({
+      tripId: state.currentTrip.id,
+      pdfBlob: combinedCtx.file,
+      pdfName: combinedCtx.file.name,
+      price: $('#combined-price').value === '' ? null : Number($('#combined-price').value),
+      reference: $('#combined-reference').value.trim(),
+      paymentStatus: $('#combined-payment-status').value,
+    });
+
+    for (const ev of events) {
+      await VoyagheureDB.createEntry({
+        tripId: state.currentTrip.id,
+        documentId: doc.id,
+        type: ev.type,
+        title: ev.title.trim(),
+        startDate: ev.startDate || null,
+        startTime: ev.startTime || null,
+        endDate: null,
+        endTime: ev.endTime || null,
+        place: ev.place || '',
+        address: ev.address || '',
+      });
+    }
+
+    closeCombinedModal();
+    await refreshAll();
+  });
+
+  // ---------------------------------------------------------------------
+  // Billet combiné — édition d'un document existant (prix/référence/statut
+  // partagés + suppression cascade)
+  // ---------------------------------------------------------------------
+  function openDocumentModal(doc, linkedEntries) {
+    documentCtx = { doc, linkedEntries };
+    $('#document-events-list').innerHTML = linkedEntries
+      .map((entry) => {
+        const meta = TYPE_META[entry.type] || TYPE_META.other;
+        const bits = [entry.startDate ? formatDateShort(entry.startDate) : null, entry.startTime, entry.place]
+          .filter(Boolean)
+          .join(' · ');
+        return `<li>${meta.icon} <strong>${escapeHtml(entry.title)}</strong>${bits ? ` — ${escapeHtml(bits)}` : ''}</li>`;
+      })
+      .join('');
+
+    $('#document-price').value = doc.price === null || doc.price === undefined ? '' : doc.price;
+    $('#document-reference').value = doc.reference || '';
+    $('#document-payment-status').value = doc.paymentStatus || 'estimate';
+
+    const viewBtn = $('#document-view-pdf');
+    viewBtn.hidden = !doc.pdfBlob;
+    viewBtn.textContent = attachmentViewLabel(doc.pdfBlob);
+    viewBtn.onclick = doc.pdfBlob ? () => openBlobInNewTab(doc.pdfBlob, doc.pdfName || 'Billet combiné') : null;
+
+    showModal('#document-modal');
+  }
+
+  $('#document-cancel').addEventListener('click', () => {
+    hideModal('#document-modal');
+    documentCtx = null;
+  });
+
+  $('#document-delete').addEventListener('click', async () => {
+    if (!documentCtx) return;
+    if (confirm(`Supprimer ce billet combiné et ses ${documentCtx.linkedEntries.length} événements ?`)) {
+      await VoyagheureDB.deleteDocument(documentCtx.doc.id);
+      hideModal('#document-modal');
+      documentCtx = null;
+      await refreshAll();
+    }
+  });
+
+  $('#document-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!documentCtx) return;
+    await VoyagheureDB.updateDocument({
+      ...documentCtx.doc,
+      price: $('#document-price').value === '' ? null : Number($('#document-price').value),
+      reference: $('#document-reference').value.trim(),
+      paymentStatus: $('#document-payment-status').value,
+    });
+    hideModal('#document-modal');
+    documentCtx = null;
     await refreshAll();
   });
 
@@ -740,11 +1081,37 @@ import { VoyagheureReminders } from './reminders.js';
   // Onglet Budget
   // ---------------------------------------------------------------------
   function renderBudget(entries) {
-    const priced = entries.filter((e) => e.price !== null && e.price !== undefined);
-    $('#budget-empty').hidden = priced.length > 0;
+    // Un billet combiné ne doit compter qu'UNE fois dans le budget, même
+    // s'il couvre plusieurs entrées de planning : on ne garde que la
+    // première entrée rencontrée par document, remplacée par une ligne
+    // "virtuelle" représentant le document (son prix/statut, pas celui
+    // d'un événement en particulier).
+    const seenDocs = new Set();
+    const billable = [];
+    entries.forEach((entry) => {
+      if (entry.documentId) {
+        if (seenDocs.has(entry.documentId)) return;
+        seenDocs.add(entry.documentId);
+        const doc = docsById.get(entry.documentId);
+        if (!doc || doc.price === null || doc.price === undefined) return;
+        billable.push({
+          id: `doc-${doc.id}`,
+          title: 'Billet combiné',
+          type: 'other',
+          price: doc.price,
+          paymentStatus: doc.paymentStatus,
+          isDocument: true,
+          document: doc,
+        });
+        return;
+      }
+      if (entry.price !== null && entry.price !== undefined) billable.push(entry);
+    });
+
+    $('#budget-empty').hidden = billable.length > 0;
 
     const sections = { paid: [], due: [], estimate: [] };
-    priced.forEach((e) => {
+    billable.forEach((e) => {
       (sections[e.paymentStatus] || sections.estimate).push(e);
     });
 
@@ -771,7 +1138,7 @@ import { VoyagheureReminders } from './reminders.js';
       const list = $(`.budget-list[data-list="${status}"]`);
       list.innerHTML = '';
       sections[status].forEach((entry) => {
-        const meta = TYPE_META[entry.type] || TYPE_META.other;
+        const meta = entry.isDocument ? { icon: '🎫' } : TYPE_META[entry.type] || TYPE_META.other;
         const li = document.createElement('li');
         li.className = 'budget-row';
         const btn = document.createElement('button');
@@ -782,7 +1149,14 @@ import { VoyagheureReminders } from './reminders.js';
           <span class="budget-row__label">${escapeHtml(entry.title)}</span>
           <span class="budget-row__amount">${formatAmount(entry.price)} €</span>
         `;
-        btn.addEventListener('click', () => openEntryModal({ mode: 'edit', existingEntry: entry }));
+        btn.addEventListener('click', async () => {
+          if (entry.isDocument) {
+            const linked = await VoyagheureDB.getEntriesForDocument(entry.document.id);
+            openDocumentModal(entry.document, linked);
+          } else {
+            openEntryModal({ mode: 'edit', existingEntry: entry });
+          }
+        });
         li.appendChild(btn);
         list.appendChild(li);
       });

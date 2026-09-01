@@ -1,11 +1,23 @@
 /**
  * Couche IndexedDB de Voyag'heure.
  *
- * Trois stores :
+ * Quatre stores :
  *  - "trips"           : les voyages/événements créés par l'utilisateur.
- *  - "entries"         : les entrées (billets, transport, hébergement,
- *                        dépenses manuelles) rattachées à un voyage, PDF
- *                        original inclus.
+ *  - "entries"         : les entrées de planning (un événement précis :
+ *                        titre, jour, heure, lieu, adresse). Une entrée
+ *                        "solo" (import PDF/image classique ou ajout
+ *                        manuel) porte aussi son prix/référence/statut de
+ *                        paiement/PDF directement — exactement comme
+ *                        avant, pour ne rien casser sur les données déjà
+ *                        stockées. Une entrée issue d'un "billet combiné"
+ *                        a plutôt un `documentId` : son prix/référence/
+ *                        statut/PDF vivent alors sur le document partagé
+ *                        (voir "documents" ci-dessous) et restent null ici.
+ *  - "documents"       : un billet combiné (un seul PDF qui couvre
+ *                        plusieurs événements distincts, ex. pass festival
+ *                        multi-jours) — porte le PDF, le prix TOTAL, la
+ *                        référence et le statut de paiement, comptés
+ *                        UNE fois pour tous les événements qu'il couvre.
  *  - "correctionRules" : préférences apprises quand l'utilisateur corrige
  *                        un champ pré-rempli par l'import PDF (ex. "pour
  *                        les documents FlixBus, préfère le prix labellisé
@@ -18,9 +30,10 @@
  */
 
 const DB_NAME = 'voyagheure-db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const TRIPS_STORE = 'trips';
 const ENTRIES_STORE = 'entries';
+const DOCUMENTS_STORE = 'documents';
 const CORRECTIONS_STORE = 'correctionRules';
 
 let dbPromise = null;
@@ -38,6 +51,14 @@ function openDb() {
         const store = db.createObjectStore(ENTRIES_STORE, { keyPath: 'id' });
         store.createIndex('tripId', 'tripId');
         store.createIndex('startDate', 'startDate');
+      }
+      if (!db.objectStoreNames.contains(DOCUMENTS_STORE)) {
+        const store = db.createObjectStore(DOCUMENTS_STORE, { keyPath: 'id' });
+        store.createIndex('tripId', 'tripId');
+      }
+      const entriesStore = req.transaction.objectStore(ENTRIES_STORE);
+      if (!entriesStore.indexNames.contains('documentId')) {
+        entriesStore.createIndex('documentId', 'documentId');
       }
       if (!db.objectStoreNames.contains(CORRECTIONS_STORE)) {
         db.createObjectStore(CORRECTIONS_STORE, { keyPath: 'id' });
@@ -122,6 +143,20 @@ async function deleteTrip(id) {
         })
     )
   );
+
+  const documents = await getDocumentsForTrip(id);
+  const documentStore = await tx(DOCUMENTS_STORE, 'readwrite');
+  await Promise.all(
+    documents.map(
+      (doc) =>
+        new Promise((resolve, reject) => {
+          const req = documentStore.delete(doc.id);
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error);
+        })
+    )
+  );
+
   const tripStore = await tx(TRIPS_STORE, 'readwrite');
   return new Promise((resolve, reject) => {
     const req = tripStore.delete(id);
@@ -139,6 +174,9 @@ async function createEntry(fields) {
   const entry = {
     id: makeId(),
     tripId: fields.tripId,
+    // Si renseigné, prix/référence/statut/PDF vivent sur ce document
+    // partagé (billet combiné) plutôt que sur l'entrée elle-même.
+    documentId: fields.documentId || null,
     type: fields.type || 'other',
     title: fields.title || 'Sans titre',
     startDate: fields.startDate || null,
@@ -211,6 +249,92 @@ async function deleteEntry(id) {
 }
 
 // ---------------------------------------------------------------------
+// Documents (billets combinés — un PDF, plusieurs entrées de planning)
+// ---------------------------------------------------------------------
+
+/**
+ * Crée le document partagé d'un billet combiné : son PDF, son prix TOTAL,
+ * sa référence et son statut de paiement — comptés une seule fois même si
+ * plusieurs entrées de planning le référencent (via `entry.documentId`).
+ */
+async function createDocument(fields) {
+  const store = await tx(DOCUMENTS_STORE, 'readwrite');
+  const doc = {
+    id: makeId(),
+    tripId: fields.tripId,
+    pdfBlob: fields.pdfBlob || null,
+    pdfName: fields.pdfName || null,
+    price: fields.price === '' || fields.price === undefined ? null : Number(fields.price),
+    reference: fields.reference || '',
+    paymentStatus: fields.paymentStatus || 'estimate',
+    addedAt: Date.now(),
+  };
+  return new Promise((resolve, reject) => {
+    const req = store.add(doc);
+    req.onsuccess = () => resolve(doc);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function updateDocument(doc) {
+  const store = await tx(DOCUMENTS_STORE, 'readwrite');
+  return new Promise((resolve, reject) => {
+    const req = store.put(doc);
+    req.onsuccess = () => resolve(doc);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getDocument(id) {
+  const store = await tx(DOCUMENTS_STORE, 'readonly');
+  return new Promise((resolve, reject) => {
+    const req = store.get(id);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getDocumentsForTrip(tripId) {
+  const store = await tx(DOCUMENTS_STORE, 'readonly');
+  return new Promise((resolve, reject) => {
+    const req = store.index('tripId').getAll(tripId);
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getEntriesForDocument(documentId) {
+  const store = await tx(ENTRIES_STORE, 'readonly');
+  return new Promise((resolve, reject) => {
+    const req = store.index('documentId').getAll(documentId);
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/** Supprime le document ET toutes les entrées de planning qui le référencent. */
+async function deleteDocument(id) {
+  const linkedEntries = await getEntriesForDocument(id);
+  const entryStore = await tx(ENTRIES_STORE, 'readwrite');
+  await Promise.all(
+    linkedEntries.map(
+      (entry) =>
+        new Promise((resolve, reject) => {
+          const req = entryStore.delete(entry.id);
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error);
+        })
+    )
+  );
+  const docStore = await tx(DOCUMENTS_STORE, 'readwrite');
+  return new Promise((resolve, reject) => {
+    const req = docStore.delete(id);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// ---------------------------------------------------------------------
 // Règles de correction apprises (import PDF)
 // ---------------------------------------------------------------------
 
@@ -257,6 +381,12 @@ export const VoyagheureDB = {
   getAllEntries,
   getEntry,
   deleteEntry,
+  createDocument,
+  updateDocument,
+  getDocument,
+  getDocumentsForTrip,
+  getEntriesForDocument,
+  deleteDocument,
   getCorrectionRule,
   saveCorrectionRule,
 };

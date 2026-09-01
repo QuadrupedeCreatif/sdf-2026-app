@@ -297,7 +297,12 @@ function detectTimeField(allLines) {
 const PRICE_LABELS = /total|prix|montant|amount|price/i;
 
 function extractPrice(text) {
-  const m = /(\d{1,4}[.,]\d{2})\s?(?:€|EUR)\b/i.exec(text) || /(?:€|EUR)\s?(\d{1,4}[.,]\d{2})/i.exec(text);
+  // (?!\w) plutôt que \b après €/EUR : € n'est pas un caractère "mot", donc
+  // \b ne matche jamais quand le symbole termine la chaîne (ex. "99,50 €"
+  // en toute fin de ligne) — bug réel qui faisait échouer la détection du
+  // prix sur la plupart des tickets.
+  const m =
+    /(\d{1,4}[.,]\d{2})\s?(?:€|EUR)(?!\w)/i.exec(text) || /(?:€|EUR)\s?(\d{1,4}[.,]\d{2})(?!\w)/i.exec(text);
   if (!m) return null;
   const value = parseFloat(m[1].replace(',', '.'));
   return Number.isFinite(value) ? { value, matchedText: m[0] } : null;
@@ -374,6 +379,120 @@ function findAddressCandidates(allLines) {
 }
 
 // ---------------------------------------------------------------------
+// Billets combinés — plusieurs blocs événement dans un même PDF
+// ---------------------------------------------------------------------
+// Un bloc commence sur une ligne débutant par un jour de la semaine (FR ou
+// EN, cf. spec) — validé seulement si un signal "Starts:"/"Location:" (ou
+// équivalent FR) apparaît dans les lignes qui suivent, pour éviter de
+// confondre un mot court isolé ("mon" en français...) avec un vrai
+// en-tête de bloc.
+const WEEKDAYS = [
+  'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche',
+  'lun', 'mar', 'mer', 'jeu', 'ven', 'sam', 'dim',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+  'mon', 'tue', 'tues', 'wed', 'thu', 'thur', 'thurs', 'fri', 'sat', 'sun',
+];
+const WEEKDAY_LINE_RE = new RegExp(`^(${WEEKDAYS.join('|')})\\.?,?\\s`, 'i');
+const BLOCK_SIGNAL_RE = /\b(starts?|d[ée]but|heure|location|lieu)\b/i;
+const BLOCK_TIME_LABELS = /starts?|d[ée]but|heure/i;
+const BLOCK_LOCATION_LABELS = /location|lieu/i;
+
+function extractBlockTime(text) {
+  const m = /\b([01]?\d|2[0-3])[:hH]([0-5]\d)\b/.exec(text);
+  return m ? { value: `${pad2(Number(m[1]))}:${m[2]}` } : null;
+}
+
+function extractBlockLocation(text) {
+  const cleaned = text.replace(/^\s*[:\-]\s*/, '').trim();
+  return cleaned ? { value: cleaned } : null;
+}
+
+/** Sépare "Venue, Rue, Code postal Ville" en { place, address } — le lieu est
+ *  le premier segment, l'adresse le reste si un code postal y apparaît. */
+function splitLocationLine(text) {
+  const trimmed = text.trim();
+  const parts = trimmed.split(',').map((p) => p.trim()).filter(Boolean);
+  if (parts.length <= 1) return { place: trimmed, address: '' };
+  const hasPostal = parts.some((p) => POSTAL_CITY_RE.test(p));
+  return { place: parts[0], address: hasPostal ? parts.slice(1).join(', ') : '' };
+}
+
+function findBlockStarts(allLines) {
+  const starts = [];
+  allLines.forEach((line, idx) => {
+    if (!WEEKDAY_LINE_RE.test(line.text)) return;
+    const windowText = allLines
+      .slice(idx, idx + 6)
+      .filter((l) => l.page === line.page)
+      .map((l) => l.text)
+      .join(' ');
+    if (BLOCK_SIGNAL_RE.test(windowText)) starts.push(idx);
+  });
+  return starts;
+}
+
+function datesInLines(lines) {
+  const found = [];
+  lines.forEach((line) => {
+    const numericRe = /\b(\d{1,2})[.\/](\d{1,2})[.\/](\d{2,4})\b/g;
+    let m;
+    while ((m = numericRe.exec(line.text))) {
+      let [, d, mo, y] = m;
+      if (y.length === 2) y = `20${y}`;
+      const day = Number(d);
+      const month = Number(mo);
+      if (day >= 1 && day <= 31 && month >= 1 && month <= 12) found.push(`${y}-${pad2(month)}-${pad2(day)}`);
+    }
+    const literalRe = new RegExp(`\\b(\\d{1,2})\\s+(${MONTH_NAMES_RE})\\.?\\s*(\\d{4})?`, 'gi');
+    while ((m = literalRe.exec(line.text))) {
+      const day = Number(m[1]);
+      const month = MONTHS[m[2].toLowerCase()];
+      const year = m[3] || String(new Date().getFullYear());
+      if (day >= 1 && day <= 31) found.push(`${year}-${month}-${pad2(day)}`);
+    }
+  });
+  return found;
+}
+
+/**
+ * Détecte plusieurs blocs événement dans un même document (billet
+ * combiné). Renvoie `null` si un seul bloc (ou aucun) n'est trouvé — dans
+ * ce cas le comportement d'import reste celui d'une entrée classique.
+ */
+function detectEventBlocks(allLines) {
+  const starts = findBlockStarts(allLines);
+  if (starts.length < 2) return null;
+
+  return starts.map((startIdx, i) => {
+    const endIdx = i + 1 < starts.length ? starts[i + 1] : allLines.length;
+    const blockLines = allLines.slice(startIdx, endIdx);
+
+    const dates = datesInLines(blockLines);
+    const timeCandidates = findLabeledCandidates(blockLines, BLOCK_TIME_LABELS, extractBlockTime, { searchNextLines: 1 });
+    const startTime = timeCandidates[0]?.value || null;
+
+    const locationCandidates = findLabeledCandidates(blockLines, BLOCK_LOCATION_LABELS, extractBlockLocation, { searchNextLines: 1 });
+    const { place, address } = locationCandidates[0] ? splitLocationLine(locationCandidates[0].value) : { place: '', address: '' };
+
+    // Titre : première ligne "libre" (ni l'en-tête jour, ni un label
+    // Starts/Location) entre le début du bloc et le premier de ces labels.
+    const labelIdx = blockLines.findIndex((l) => BLOCK_TIME_LABELS.test(l.text) || BLOCK_LOCATION_LABELS.test(l.text));
+    const titleZone = blockLines.slice(1, labelIdx === -1 ? blockLines.length : labelIdx);
+    const titleLine = titleZone.find((l) => l.text.length > 2 && l.text.length < 80);
+
+    return {
+      type: 'event',
+      title: titleLine ? titleLine.text : `Événement ${i + 1}`,
+      startDate: dates[0] || null,
+      startTime,
+      endTime: null,
+      place,
+      address,
+    };
+  });
+}
+
+// ---------------------------------------------------------------------
 // API principale
 // ---------------------------------------------------------------------
 
@@ -402,6 +521,7 @@ function emptyAnalysis(file) {
     reference: emptyField(),
     docSignature: null,
     candidates: {},
+    blocks: null,
   };
 }
 
@@ -427,6 +547,10 @@ async function analyzePdf(file) {
 
   const text = allLines.map((l) => l.text).join('\n');
   const docSignature = detectDocSignature(text);
+
+  // Billet combiné : plusieurs blocs événement (jour + Starts/Location)
+  // détectés dans le même document. Un seul bloc = comportement inchangé.
+  const blocks = detectEventBlocks(allLines);
 
   const typeField = detectTypeField(allLines, text);
   const { startDate, endDate } = detectDatesField(allLines);
@@ -469,6 +593,7 @@ async function analyzePdf(file) {
       address: addressCandidates,
       place: placeCandidates,
     },
+    blocks,
   };
 }
 

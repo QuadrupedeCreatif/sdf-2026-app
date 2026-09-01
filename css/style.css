@@ -428,6 +428,28 @@ body {
   cursor: pointer;
 }
 
+/* Carte "billet combiné" (un PDF/QR partagé par plusieurs événements) :
+   même gabarit que .doc-card, avec un dégradé plein plutôt qu'un liseré de
+   type (un billet combiné peut couvrir plusieurs types d'événements) et une
+   ligne listant les événements couverts en guise de sous-titre. */
+.doc-card--combined {
+  border-left: 3px solid transparent;
+  border-image: var(--gradient-accent) 1;
+  background: linear-gradient(135deg, rgba(242, 137, 90, 0.1), rgba(232, 93, 134, 0.06)), var(--aubergine-light);
+}
+
+.doc-card__combined-events {
+  font-size: 11.5px;
+  color: rgba(251, 238, 228, 0.45);
+  margin-top: 3px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
 .doc-card__map {
   background: rgba(107, 207, 159, 0.14);
   color: var(--ok);
@@ -921,6 +943,83 @@ body {
 
 .modal__actions--wrap .btn {
   flex: 1 1 45%;
+}
+
+/* ---------- Billet combiné (import multi-événements + édition) ---------- */
+.combined-events-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.combined-event {
+  background: var(--aubergine);
+  border: 1px solid rgba(242, 137, 90, 0.2);
+  border-radius: 14px;
+  padding: 12px 12px 2px;
+  margin: 0;
+  min-width: 0;
+}
+
+.combined-event__remove:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.combined-event__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.combined-event__number {
+  font-family: var(--font-display);
+  font-size: 11.5px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--corail);
+}
+
+.combined-event__remove {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(232, 93, 134, 0.14);
+  color: var(--rose);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.combined-shared-hint {
+  margin-top: 4px;
+}
+
+#combined-add-event {
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+.document-events-list {
+  list-style: none;
+  margin: 0 0 14px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.document-events-list li {
+  background: var(--aubergine);
+  border: 1px solid rgba(242, 137, 90, 0.15);
+  border-radius: 12px;
+  padding: 9px 12px;
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 /* ---------- Scrollbar (léger, esthétique) ---------- */

@@ -51,15 +51,29 @@ dépense ajoutée à la main) :
 | `endDate`, `endTime` | Date et heure de fin (optionnelles, ex. check-out d'un hôtel) |
 | `place` | Lieu (nom du venue/gare/hôtel) |
 | `address` | Adresse postale libre (rue, ville, code postal) — sert au bouton 📍 |
-| `price` | Montant en € (optionnel) |
-| `reference` | Référence / numéro de commande |
-| `paymentStatus` | `paid` (déjà payé) / `due` (à venir) / `estimate` (estimé) |
+| `price` | Montant en € (optionnel) — `null` si l'entrée fait partie d'un **billet combiné** (voir plus bas) |
+| `reference` | Référence / numéro de commande — idem, vide si billet combiné |
+| `paymentStatus` | `paid` / `due` / `estimate` — idem, sans effet si billet combiné |
 | `reminderMode` | `default` (réglage global) / `custom` (voir `reminderMinutes`) / `none` |
 | `reminderMinutes` | Délai personnalisé en minutes, utilisé seulement si `reminderMode: 'custom'` |
-| `pdfBlob` | Le fichier original (`Blob`, PDF **ou image**), absent pour une entrée ajoutée à la main |
+| `pdfBlob` | Le fichier original (`Blob`, PDF **ou image**) — `null` si billet combiné (voir `documents`) |
+| `documentId` | Si renseigné, cette entrée fait partie d'un **billet combiné** : son prix/référence/statut/PDF vivent sur le document partagé, pas sur elle-même |
 
-Le Planning et le Budget sont **entièrement dérivés** de ces entrées : aucune
-donnée de planning/budget n'est stockée séparément.
+**`documents`** — le "document source" d'un **billet combiné** : un seul
+PDF (même QR code/code-barres) qui couvre plusieurs événements distincts
+(ex. un pass festival multi-jours). Porte le PDF, le prix **total**, la
+référence et le statut de paiement, comptés **une seule fois** pour tous
+les événements qu'il couvre :
+
+| Champ | Description |
+|---|---|
+| `pdfBlob`, `pdfName` | Le PDF original, partagé par toutes les entrées qui le référencent |
+| `price` | Montant total en € |
+| `reference` | Référence / numéro de commande, partagée |
+| `paymentStatus` | `paid` / `due` / `estimate`, partagé |
+
+Le Planning et le Budget sont **entièrement dérivés** de ces entrées (et
+documents) : aucune donnée de planning/budget n'est stockée séparément.
 
 ## Import intelligent
 
@@ -87,7 +101,10 @@ Heuristiques appliquées :
 - **Heure** : formats `14:30` ou `14h30`.
 - **Prix** : `24,00 €`, `€ 24,00`, `24,00 EUR`, en priorité sur une ligne
   contenant "Total"/"Prix"/"Montant" — un montant labellisé
-  "sous-total"/"partiel" passe après les autres par défaut.
+  "sous-total"/"partiel" passe après les autres par défaut. (Le symbole `€`
+  n'est pas une "frontière de mot" : le regex utilise une négation
+  explicite plutôt que `\b` pour ne pas rater un montant en toute fin de
+  ligne, cas le plus courant sur un ticket.)
 - **Lieu** : libellés lieu/venue/destination/départ/arrivée, en écartant
   les candidats qui ressemblent à une date plutôt qu'à un lieu.
 - **Adresse** : une ligne « code postal + ville » (`75012 Paris`,
@@ -125,6 +142,44 @@ correction. Champs concernés : prix, référence, adresse, lieu.
 
 Le bouton **« Ajouter manuellement »** ouvre le même formulaire vide, pour
 les dépenses sans PDF ni photo (nourriture estimée, souvenirs...).
+
+### Billets combinés (un PDF, plusieurs événements)
+
+Certains billets couvrent **plusieurs événements distincts avec le même QR
+code/code-barres** — typiquement un pass festival multi-jours. Pendant
+l'extraction, `js/parser.js` détecte la répétition d'un motif "en-tête jour
+de la semaine (Ven./Sam./Mon.../Ven. 28 août...) suivi d'un libellé
+Starts/Location + adresse" — un bloc par occurrence :
+
+- **Un seul bloc détecté** (ou aucun) → comportement inchangé, import
+  classique d'une entrée unique.
+- **Plusieurs blocs détectés** → la confirmation d'import bascule sur un
+  écran dédié : la **liste des événements détectés** (titre, jour, heure,
+  lieu, adresse), modifiable un par un, plus **un seul** champ de prix et
+  **une seule** référence pour l'ensemble du billet (jamais demandés événement
+  par événement).
+
+À la validation, Voyag'heure crée **un document partagé** (`documents`,
+avec le PDF, le prix total, la référence et le statut de paiement) puis
+**une entrée par événement** détecté, chacune pointant vers ce document via
+son `documentId` — son propre prix/référence/statut/PDF restent `null`.
+
+Effets sur le reste de l'app :
+
+- **Planning** : les événements apparaissent normalement, chacun à sa
+  date/heure ; cliquer sur l'un d'eux ouvre le **même** PDF partagé (le
+  QR/code-barres du billet).
+- **Entrées** : au lieu d'une carte par événement, une **seule carte
+  « Billet combiné »** liste les événements couverts en sous-titre ; son
+  bouton ✎ ouvre l'édition du prix/référence/statut partagés, son bouton ✕
+  supprime le document **et** toutes ses entrées liées (avec confirmation
+  mentionnant leur nombre).
+- **Budget** : le prix du document est compté **une seule fois**, quel que
+  soit le nombre d'événements qu'il couvre — pas de double comptage. Modifier
+  le statut de paiement ou le montant se fait une fois, pour tout le billet.
+- Éditer un événement individuel (titre, heure, lieu...) depuis Planning ou
+  Entrées masque les champs prix/référence/statut (avec une note explicative)
+  puisqu'ils ne s'appliquent pas à un seul événement du billet.
 
 ### Import d'une image (PNG/JPG)
 
