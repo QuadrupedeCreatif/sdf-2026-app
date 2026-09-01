@@ -111,6 +111,70 @@ import { VoyagheureReminders } from './reminders.js';
     return `${h} h ${m}`;
   }
 
+  // Champs pré-remplissables par l'import PDF, mappés vers l'id de leur
+  // <input>/<select> — utilisé pour lire/écrire la valeur indifféremment
+  // qu'elle vienne d'un champ riche `{value,snippet,confidence}` (import)
+  // ou d'une entrée simple déjà en base (édition).
+  const DETECTABLE_FIELDS = {
+    type: 'entry-type',
+    startDate: 'entry-start-date',
+    startTime: 'entry-start-time',
+    endDate: 'entry-end-date',
+    place: 'entry-place',
+    address: 'entry-address',
+    price: 'entry-price',
+    reference: 'entry-reference',
+  };
+
+  /** Lit la valeur d'un champ, qu'il soit riche `{value,...}` (import) ou brut (édition/manuel). */
+  function fieldValue(f) {
+    if (f && typeof f === 'object' && 'value' in f) return f.value;
+    return f;
+  }
+
+  function truncate(str, max) {
+    if (!str) return '';
+    return str.length > max ? `${str.slice(0, max).trim()}…` : str;
+  }
+
+  function clearFieldHints() {
+    Object.values(DETECTABLE_FIELDS).forEach((inputId) => {
+      const hint = document.getElementById(`${inputId}-hint`);
+      if (hint) {
+        hint.hidden = true;
+        hint.textContent = '';
+      }
+      const fieldLabel = document.getElementById(inputId)?.closest('.field');
+      if (fieldLabel) fieldLabel.classList.remove('field--unsure');
+    });
+  }
+
+  /**
+   * Affiche, sous chaque champ pré-rempli par l'import, l'extrait de texte
+   * source qui a servi à sa détection ; un champ sans détection fiable
+   * reste vide et est signalé (bordure + icône) plutôt que deviné.
+   * `parsed` doit être le résultat riche de VoyagheureParser.analyzePdf
+   * (ou VoyagheureParser.emptyAnalysis pour une image).
+   */
+  function applyFieldHints(parsed) {
+    clearFieldHints();
+    if (!parsed) return;
+    Object.entries(DETECTABLE_FIELDS).forEach(([key, inputId]) => {
+      const f = parsed[key];
+      if (!f || typeof f !== 'object') return;
+      const hint = document.getElementById(`${inputId}-hint`);
+      const fieldLabel = document.getElementById(inputId)?.closest('.field');
+      if (f.confidence && f.snippet) {
+        if (hint) {
+          hint.hidden = false;
+          hint.textContent = `détecté depuis : « ${truncate(f.snippet, 70)} »`;
+        }
+      } else if (fieldLabel) {
+        fieldLabel.classList.add('field--unsure');
+      }
+    });
+  }
+
   const TYPE_META = {
     transport: { icon: '🚌', label: 'Transport' },
     event: { icon: '🎟️', label: 'Billet événement' },
@@ -371,13 +435,12 @@ import { VoyagheureReminders } from './reminders.js';
     const file = importQueue.shift();
 
     // Image : pas d'extraction automatique, juste un formulaire assisté
-    // avec l'image affichée en aperçu pour recopier rapidement.
+    // avec l'image affichée en aperçu pour recopier rapidement. Tous les
+    // champs restent donc à confiance nulle (non détectés).
     if (file.type.startsWith('image/')) {
-      openEntryModal({
-        mode: 'import-image',
-        file,
-        parsed: { type: 'other', title: VoyagheureParser.titleFromFilename(file.name), startDate: null, startTime: null, endDate: null, place: '', address: '', price: null, reference: '' },
-      });
+      const parsed = VoyagheureParser.emptyAnalysis(file);
+      parsed.type.value = 'other';
+      openEntryModal({ mode: 'import-image', file, parsed });
       return;
     }
 
@@ -387,7 +450,7 @@ import { VoyagheureReminders } from './reminders.js';
       parsed = await VoyagheureParser.analyzePdf(file);
     } catch (err) {
       console.warn('Analyse du PDF impossible', err);
-      parsed = { type: 'event', title: VoyagheureParser.titleFromFilename(file.name), startDate: null, startTime: null, endDate: null, place: '', address: '', price: null, reference: '' };
+      parsed = VoyagheureParser.emptyAnalysis(file);
     }
     $('#import-status').hidden = true;
     openEntryModal({ mode: 'import', file, parsed });
@@ -435,20 +498,32 @@ import { VoyagheureReminders } from './reminders.js';
       $('#entry-image-preview').hidden = false;
     }
 
-    $('#entry-type').value = data.type || 'other';
+    const startDate = fieldValue(data.startDate);
+    const startTime = fieldValue(data.startTime);
+    const endDate = fieldValue(data.endDate);
+    const place = fieldValue(data.place);
+    const address = fieldValue(data.address);
+    const price = fieldValue(data.price);
+    const reference = fieldValue(data.reference);
+
+    $('#entry-type').value = fieldValue(data.type) || 'other';
     $('#entry-title').value = data.title || '';
-    $('#entry-start-date').value = data.startDate || '';
-    $('#entry-start-time').value = data.startTime || '';
-    $('#entry-end-date').value = data.endDate || '';
+    $('#entry-start-date').value = startDate || '';
+    $('#entry-start-time').value = startTime || '';
+    $('#entry-end-date').value = endDate || '';
     $('#entry-end-time').value = data.endTime || '';
-    $('#entry-place').value = data.place || '';
-    $('#entry-address').value = data.address || '';
-    $('#entry-price').value = data.price === null || data.price === undefined ? '' : data.price;
-    $('#entry-reference').value = data.reference || '';
+    $('#entry-place').value = place || '';
+    $('#entry-address').value = address || '';
+    $('#entry-price').value = price === null || price === undefined ? '' : price;
+    $('#entry-reference').value = reference || '';
     $('#entry-payment-status').value = data.paymentStatus || (isImport ? 'paid' : 'estimate');
     $('#entry-reminder-mode').value = data.reminderMode || 'default';
     $('#entry-reminder-minutes').value = data.reminderMinutes === null || data.reminderMinutes === undefined ? '' : data.reminderMinutes;
     updateReminderCustomFieldVisibility();
+
+    // Extraits sources + signalement des champs non détectés — seulement
+    // pertinent juste après un import (PDF ou image).
+    applyFieldHints(isImport ? ctx.parsed : null);
 
     const blob = isEdit ? ctx.existingEntry.pdfBlob : isImport ? ctx.file : null;
     const viewBtn = $('#entry-view-pdf');
@@ -468,6 +543,36 @@ import { VoyagheureReminders } from './reminders.js';
     entryCtx = null;
     if (wasImport && importQueue.length > 0) {
       setTimeout(processNextImport, 180);
+    }
+  }
+
+  // Champs sur lesquels on mémorise les corrections récurrentes (voir
+  // js/db.js "correctionRules") : quand plusieurs candidats existaient et
+  // que l'utilisateur a choisi une valeur différente de celle suggérée qui
+  // correspond à un AUTRE candidat détecté, on retient son libellé comme
+  // préféré pour ce type de document.
+  const LEARNABLE_FIELDS = ['price', 'reference', 'address', 'place'];
+
+  async function maybeLearnFromCorrection(ctx, values) {
+    if (ctx.mode !== 'import' || !ctx.parsed || !ctx.parsed.docSignature) return;
+    const { docSignature, candidates } = ctx.parsed;
+
+    for (const key of LEARNABLE_FIELDS) {
+      const original = ctx.parsed[key]?.value;
+      const finalValue = values[key];
+      const same =
+        key === 'price'
+          ? Number(original) === Number(finalValue)
+          : String(original || '').trim() === String(finalValue || '').trim();
+      if (same) continue; // rien corrigé sur ce champ
+
+      const pool = candidates?.[key] || [];
+      const match = pool.find((c) =>
+        key === 'price' ? Number(c.value) === Number(finalValue) : String(c.value).trim() === String(finalValue || '').trim()
+      );
+      if (match && match.label) {
+        await VoyagheureDB.saveCorrectionRule(docSignature, key, match.label);
+      }
     }
   }
 
@@ -507,6 +612,8 @@ import { VoyagheureReminders } from './reminders.js';
       reminderMinutes: $('#entry-reminder-minutes').value === '' ? null : Number($('#entry-reminder-minutes').value),
     };
     if (!values.title) return;
+
+    await maybeLearnFromCorrection(entryCtx, values);
 
     if (entryCtx.mode === 'edit') {
       await VoyagheureDB.updateEntry({ ...entryCtx.existingEntry, ...values });

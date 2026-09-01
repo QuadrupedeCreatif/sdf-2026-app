@@ -1,10 +1,16 @@
 /**
  * Couche IndexedDB de Voyag'heure.
  *
- * Deux stores :
- *  - "trips"   : les voyages/événements créés par l'utilisateur.
- *  - "entries" : les entrées (billets, transport, hébergement, dépenses
- *                manuelles) rattachées à un voyage, PDF original inclus.
+ * Trois stores :
+ *  - "trips"           : les voyages/événements créés par l'utilisateur.
+ *  - "entries"         : les entrées (billets, transport, hébergement,
+ *                        dépenses manuelles) rattachées à un voyage, PDF
+ *                        original inclus.
+ *  - "correctionRules" : préférences apprises quand l'utilisateur corrige
+ *                        un champ pré-rempli par l'import PDF (ex. "pour
+ *                        les documents FlixBus, préfère le prix labellisé
+ *                        'Total'"). Une ligne par (signature de document,
+ *                        champ) — pas de ML, juste une table de préférence.
  *
  * Rien de spécifique à un événement précis n'est codé ici : toutes les
  * données viennent de l'utilisateur, à la création du voyage ou à
@@ -12,9 +18,10 @@
  */
 
 const DB_NAME = 'voyagheure-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const TRIPS_STORE = 'trips';
 const ENTRIES_STORE = 'entries';
+const CORRECTIONS_STORE = 'correctionRules';
 
 let dbPromise = null;
 
@@ -31,6 +38,9 @@ function openDb() {
         const store = db.createObjectStore(ENTRIES_STORE, { keyPath: 'id' });
         store.createIndex('tripId', 'tripId');
         store.createIndex('startDate', 'startDate');
+      }
+      if (!db.objectStoreNames.contains(CORRECTIONS_STORE)) {
+        db.createObjectStore(CORRECTIONS_STORE, { keyPath: 'id' });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -200,6 +210,41 @@ async function deleteEntry(id) {
   });
 }
 
+// ---------------------------------------------------------------------
+// Règles de correction apprises (import PDF)
+// ---------------------------------------------------------------------
+
+function correctionId(docSignature, field) {
+  return `${docSignature}::${field}`;
+}
+
+/** Retourne la règle apprise pour (signature de document, champ), ou null. */
+async function getCorrectionRule(docSignature, field) {
+  if (!docSignature) return null;
+  const store = await tx(CORRECTIONS_STORE, 'readonly');
+  return new Promise((resolve, reject) => {
+    const req = store.get(correctionId(docSignature, field));
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/**
+ * Enregistre/actualise la préférence apprise : pour ce type de document,
+ * préfère désormais la valeur associée au libellé `preferLabel` (ex.
+ * "Total") pour ce champ. Un import ultérieur du même type de document
+ * l'appliquera avant la simple heuristique par défaut.
+ */
+async function saveCorrectionRule(docSignature, field, preferLabel) {
+  const store = await tx(CORRECTIONS_STORE, 'readwrite');
+  const rule = { id: correctionId(docSignature, field), docSignature, field, preferLabel, updatedAt: Date.now() };
+  return new Promise((resolve, reject) => {
+    const req = store.put(rule);
+    req.onsuccess = () => resolve(rule);
+    req.onerror = () => reject(req.error);
+  });
+}
+
 export const VoyagheureDB = {
   createTrip,
   updateTrip,
@@ -212,4 +257,6 @@ export const VoyagheureDB = {
   getAllEntries,
   getEntry,
   deleteEntry,
+  getCorrectionRule,
+  saveCorrectionRule,
 };

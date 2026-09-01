@@ -4,7 +4,7 @@
  * ce SW garantit seulement que l'app elle-même (HTML/CSS/JS/pdf.js/icônes/
  * polices) s'ouvre sans connexion une fois installée.
  */
-const SHELL_CACHE = 'voyagheure-shell-v3';
+const SHELL_CACHE = 'voyagheure-shell-v4';
 const FONT_CACHE = 'voyagheure-fonts-v1';
 const CURRENT_CACHES = [SHELL_CACHE, FONT_CACHE];
 

@@ -1,50 +1,147 @@
 /**
- * Extraction de texte PDF (pdf.js, vendored) + détection heuristique des
- * champs d'une entrée (type, dates, heure, prix, lieu, référence).
+ * Extraction PDF (pdf.js, vendored) + détection heuristique des champs
+ * d'une entrée (type, dates, heure, prix, lieu, adresse, référence).
  *
- * Rien n'est garanti à 100% : c'est un pré-remplissage, l'utilisateur
- * valide ou corrige toujours dans le formulaire de confirmation.
+ * Approche par POSITION : on reconstruit les lignes de chaque page à
+ * partir des coordonnées (x, y) de chaque fragment de texte que pdf.js
+ * fournit (`item.transform`), au lieu de concaténer tout le texte en une
+ * seule chaîne. Un champ est associé à sa valeur par proximité spatiale
+ * (même ligne après un libellé, ou ligne suivante juste en dessous) —
+ * pas par un regex appliqué à un texte plat où l'ordre peut être ambigu.
+ *
+ * Chaque champ détecté porte son "snippet" (l'extrait de texte source qui
+ * a servi à la détection) et un booléen `confidence`. Rien n'est garanti
+ * à 100% : c'est un pré-remplissage, l'utilisateur valide ou corrige
+ * toujours dans le formulaire de confirmation. Un champ sans détection
+ * fiable reste `null`/`confidence:false` plutôt que de deviner.
+ *
+ * Mémorisation des corrections (voir js/db.js, store "correctionRules") :
+ * quand plusieurs candidats existent pour un champ (ex. plusieurs prix
+ * sur la page — sous-total, taxes, total), on retient pour chaque
+ * candidat le libellé qui l'a introduit. Si l'utilisateur corrige un
+ * champ vers un autre candidat détecté, on mémorise que pour ce type de
+ * document, ce libellé est préféré — appliqué dès le prochain import du
+ * même type de document.
  */
 import * as pdfjsLib from '../vendor/pdfjs/pdf.min.mjs';
+import { VoyagheureDB } from './db.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdfjs/pdf.worker.min.mjs', import.meta.url).href;
 
+// ---------------------------------------------------------------------
+// Extraction positionnelle : pages -> lignes (avec x/y) -> texte
+// ---------------------------------------------------------------------
+
 /**
- * Extrait tout le texte d'un fichier PDF (File/Blob), en reconstruisant les
- * retours à la ligne à partir de la position verticale des fragments de
- * texte (pdf.js ne les fournit pas telles quelles) — indispensable pour que
- * les heuristiques ligne par ligne (prix, lieu, référence) restent fiables.
+ * Reconstruit les lignes de chaque page à partir de la position (x, y)
+ * de chaque fragment de texte, triées dans l'ordre de lecture naturel
+ * (haut → bas, gauche → droite) plutôt que dans l'ordre d'émission brut
+ * de pdf.js.
  */
-async function extractPdfText(file) {
+async function extractPdfLines(file) {
   const buffer = await file.arrayBuffer();
   const doc = await pdfjsLib.getDocument({ data: buffer }).promise;
   const pages = [];
   for (let i = 1; i <= doc.numPages; i++) {
     const page = await doc.getPage(i);
     const content = await page.getTextContent();
-    const lines = [];
-    let currentLine = '';
-    let lastY = null;
+
+    const rows = [];
+    let current = null;
     for (const item of content.items) {
-      if (!('str' in item)) continue;
-      const y = item.transform ? item.transform[5] : null;
-      if (lastY !== null && y !== null && Math.abs(y - lastY) > 2) {
-        if (currentLine.trim()) lines.push(currentLine.trim());
-        currentLine = '';
+      if (!('str' in item) || !item.str.trim()) continue;
+      const x = item.transform ? item.transform[4] : 0;
+      const y = item.transform ? item.transform[5] : 0;
+      if (!current || Math.abs(current.y - y) > 2) {
+        current = { y, items: [] };
+        rows.push(current);
       }
-      currentLine += (currentLine && !currentLine.endsWith(' ') && !item.str.startsWith(' ') ? ' ' : '') + item.str;
-      lastY = y;
+      current.items.push({ str: item.str, x });
     }
-    if (currentLine.trim()) lines.push(currentLine.trim());
-    pages.push(lines.join('\n'));
+
+    // Le repère PDF a un axe Y croissant vers le haut : la première ligne
+    // de la page a le plus grand y.
+    rows.sort((a, b) => b.y - a.y);
+    rows.forEach((row) => row.items.sort((a, b) => a.x - b.x));
+
+    const lines = rows
+      .map((row) => ({
+        y: row.y,
+        x0: row.items[0]?.x ?? 0,
+        text: row.items
+          .map((it) => it.str)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim(),
+      }))
+      .filter((l) => l.text);
+
+    pages.push({ pageIndex: i, lines });
   }
-  return pages.join('\n');
+  return pages;
 }
 
 // ---------------------------------------------------------------------
-// Détection du type de document
+// Recherche générique par proximité label → valeur
 // ---------------------------------------------------------------------
-const TRANSPORT_KEYWORDS = [
+
+/**
+ * Cherche, pour chaque ligne contenant `labelRe`, une valeur soit sur la
+ * même ligne juste après le libellé, soit (à défaut) sur une des
+ * `searchNextLines` lignes suivantes de la même page — pour gérer les
+ * mises en page en tableau où le libellé est au-dessus de la valeur.
+ * `extractValue(text)` doit renvoyer `{ value, matchedText }` ou `null`.
+ */
+function findLabeledCandidates(allLines, labelRe, extractValue, { searchNextLines = 0 } = {}) {
+  const candidates = [];
+  allLines.forEach((line, idx) => {
+    const m = labelRe.exec(line.text);
+    labelRe.lastIndex = 0;
+    if (!m) return;
+
+    // Le libellé mémorisé est le texte de la ligne JUSQU'AU mot-clé inclus
+    // (ex. "Sous-total", pas seulement "total") : indispensable pour
+    // distinguer "Sous-total" de "Total" quand les deux contiennent le même
+    // mot-clé — sinon la préférence apprise ne pourrait pas les départager.
+    const label = line.text.slice(0, m.index + m[0].length).trim();
+    const after = line.text.slice(m.index + m[0].length);
+    const found = extractValue(after);
+    if (found) {
+      candidates.push({ value: found.value, label, snippet: line.text, page: line.page, y: line.y });
+      return;
+    }
+    for (let n = 1; n <= searchNextLines; n++) {
+      const next = allLines[idx + n];
+      if (!next || next.page !== line.page) break;
+      const found2 = extractValue(next.text);
+      if (found2) {
+        candidates.push({ value: found2.value, label, snippet: next.text, page: next.page, y: next.y });
+        break;
+      }
+    }
+  });
+  return candidates;
+}
+
+function toField(candidate) {
+  if (!candidate) return { value: null, snippet: null, confidence: false };
+  return { value: candidate.value, snippet: candidate.snippet, confidence: true };
+}
+
+/** Applique la règle apprise (préférence de libellé) si elle matche un des candidats, sinon garde l'ordre par défaut. */
+function chooseCandidate(candidates, rule) {
+  if (candidates.length === 0) return null;
+  if (rule && rule.preferLabel) {
+    const preferred = candidates.find((c) => c.label && c.label.toLowerCase().includes(rule.preferLabel.toLowerCase()));
+    if (preferred) return preferred;
+  }
+  return candidates[0];
+}
+
+// ---------------------------------------------------------------------
+// Type de document — mots-clés pondérés (fort = 3, faible = 1)
+// ---------------------------------------------------------------------
+const TRANSPORT_STRONG = [
   'flixbus', 'blablacar', 'blablabus', 'ouibus', 'eurolines',
   'sncf', 'trainline', 'eurostar', 'thalys', 'ouigo', 'ryanair',
   'easyjet', 'vueling', 'transavia', 'air france', 'lufthansa',
@@ -52,23 +149,63 @@ const TRANSPORT_KEYWORDS = [
   'carte d\'embarquement', 'billet de train', 'ticket bus', 'flight',
   'vol n°', 'terminal', 'quai n°', 'voie n°',
 ];
-const LODGING_KEYWORDS = [
+const TRANSPORT_WEAK = ['départ', 'depart', 'arrivée', 'arrivee'];
+
+const LODGING_STRONG = [
   'hostelworld', 'booking.com', 'airbnb', 'hostel', 'hôtel', 'hotel',
   'auberge de jeunesse', 'check-in', 'check-out', 'nuitée', 'nuitées',
-  'chambre', 'réservation logement', 'guest house',
+  'nuit', 'chambre', 'réservation logement', 'guest house',
 ];
 
-function detectType(text) {
+const EVENT_STRONG = ['billet', 'ticket', 'portes', 'doors', 'concert', 'festival', 'salle'];
+
+function scoreKeywords(lower, list, weight) {
+  return list.reduce((sum, kw) => sum + (lower.includes(kw) ? weight : 0), 0);
+}
+
+function scoreTypes(lower) {
+  return {
+    transport: scoreKeywords(lower, TRANSPORT_STRONG, 3) + scoreKeywords(lower, TRANSPORT_WEAK, 1),
+    lodging: scoreKeywords(lower, LODGING_STRONG, 3),
+    event: scoreKeywords(lower, EVENT_STRONG, 2),
+  };
+}
+
+function bestType(lower) {
+  const scores = scoreTypes(lower);
+  const [type, score] = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
+  return { type, score };
+}
+
+function detectTypeField(allLines, text) {
+  const { type, score } = bestType(text.toLowerCase());
+  if (score === 0) return { value: 'event', snippet: null, confidence: false };
+  const keywordsByType = { transport: [...TRANSPORT_STRONG, ...TRANSPORT_WEAK], lodging: LODGING_STRONG, event: EVENT_STRONG };
+  const kws = keywordsByType[type];
+  const line = allLines.find((l) => kws.some((kw) => l.text.toLowerCase().includes(kw)));
+  return { value: type, snippet: line ? line.text : null, confidence: true };
+}
+
+// Fournisseurs connus -> signature de document précise (sinon on retombe
+// sur "type:<transport|lodging|event>").
+const KNOWN_PROVIDERS = [
+  'flixbus', 'blablacar', 'ouibus', 'sncf', 'trainline', 'eurostar', 'thalys',
+  'ouigo', 'ryanair', 'easyjet', 'transavia', 'air france', 'lufthansa',
+  'hostelworld', 'booking.com', 'airbnb',
+];
+
+function detectDocSignature(text) {
   const lower = text.toLowerCase();
-  if (TRANSPORT_KEYWORDS.some((kw) => lower.includes(kw))) return 'transport';
-  if (LODGING_KEYWORDS.some((kw) => lower.includes(kw))) return 'lodging';
-  return 'event';
+  const provider = KNOWN_PROVIDERS.find((p) => lower.includes(p));
+  if (provider) return provider.replace(/[^a-z0-9]/g, '');
+  return `type:${bestType(lower).type}`;
 }
 
 // ---------------------------------------------------------------------
-// Détection des dates
+// Dates — JJ.MM.AAAA, JJ/MM/AAAA, "28 août 2026", "28 August"
 // ---------------------------------------------------------------------
-const MONTHS_FR = {
+const MONTHS = {
+  // Français
   janvier: '01', janv: '01', jan: '01',
   février: '02', fevrier: '02', févr: '02', fevr: '02', fev: '02',
   mars: '03',
@@ -81,141 +218,165 @@ const MONTHS_FR = {
   octobre: '10', oct: '10',
   novembre: '11', nov: '11',
   décembre: '12', decembre: '12', déc: '12', dec: '12',
+  // Anglais
+  january: '01',
+  february: '02', feb: '02',
+  march: '03', mar: '03',
+  april: '04', apr: '04',
+  june: '06', jun: '06',
+  july: '07', jul: '07',
+  august: '08', aug: '08',
+  september: '09',
+  october: '10',
+  november: '11',
+  december: '12',
 };
+const MONTH_NAMES_RE = Object.keys(MONTHS).join('|');
 
 function pad2(n) {
   return String(n).padStart(2, '0');
 }
 
-/** Retourne une liste de dates ISO (YYYY-MM-DD) trouvées dans le texte, dans l'ordre d'apparition. */
-function detectDates(text) {
+function detectDatesField(allLines) {
   const found = [];
-
-  // JJ.MM.AAAA ou JJ/MM/AAAA (AAAA sur 2 ou 4 chiffres)
-  const numericRe = /\b(\d{1,2})[.\/](\d{1,2})[.\/](\d{2,4})\b/g;
-  let m;
-  while ((m = numericRe.exec(text))) {
-    let [, d, mo, y] = m;
-    if (y.length === 2) y = `20${y}`;
-    const day = Number(d);
-    const month = Number(mo);
-    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
-      found.push({ index: m.index, iso: `${y}-${pad2(month)}-${pad2(day)}` });
+  allLines.forEach((line) => {
+    const numericRe = /\b(\d{1,2})[.\/](\d{1,2})[.\/](\d{2,4})\b/g;
+    let m;
+    while ((m = numericRe.exec(line.text))) {
+      let [, d, mo, y] = m;
+      if (y.length === 2) y = `20${y}`;
+      const day = Number(d);
+      const month = Number(mo);
+      if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+        found.push({ iso: `${y}-${pad2(month)}-${pad2(day)}`, snippet: line.text });
+      }
     }
-  }
-
-  // "Ven. 28 août" / "28 août 2026" / "28 août" (jour + mois en lettres, année optionnelle)
-  const monthNames = Object.keys(MONTHS_FR).join('|');
-  const literalRe = new RegExp(`\\b(\\d{1,2})\\s+(${monthNames})\\.?\\s*(\\d{4})?`, 'gi');
-  while ((m = literalRe.exec(text))) {
-    const day = Number(m[1]);
-    const month = MONTHS_FR[m[2].toLowerCase()];
-    const year = m[3] || String(new Date().getFullYear());
-    if (day >= 1 && day <= 31) {
-      found.push({ index: m.index, iso: `${year}-${month}-${pad2(day)}` });
+    const literalRe = new RegExp(`\\b(\\d{1,2})\\s+(${MONTH_NAMES_RE})\\.?\\s*(\\d{4})?`, 'gi');
+    while ((m = literalRe.exec(line.text))) {
+      const day = Number(m[1]);
+      const month = MONTHS[m[2].toLowerCase()];
+      const year = m[3] || String(new Date().getFullYear());
+      if (day >= 1 && day <= 31) {
+        found.push({ iso: `${year}-${month}-${pad2(day)}`, snippet: line.text });
+      }
     }
-  }
+  });
 
-  found.sort((a, b) => a.index - b.index);
-  // dédoublonne en gardant la première occurrence de chaque date
   const seen = new Set();
   const ordered = [];
-  for (const f of found) {
+  found.forEach((f) => {
     if (!seen.has(f.iso)) {
       seen.add(f.iso);
-      ordered.push(f.iso);
+      ordered.push(f);
     }
-  }
-  return ordered;
+  });
+
+  const start = ordered[0];
+  const end = ordered.length > 1 ? ordered[ordered.length - 1] : null;
+  return {
+    startDate: start ? { value: start.iso, snippet: start.snippet, confidence: true } : { value: null, snippet: null, confidence: false },
+    endDate: end ? { value: end.iso, snippet: end.snippet, confidence: true } : { value: null, snippet: null, confidence: false },
+  };
 }
 
 // ---------------------------------------------------------------------
-// Détection de l'heure
+// Heure
 // ---------------------------------------------------------------------
-function detectTime(text) {
+function detectTimeField(allLines) {
   const re = /\b([01]?\d|2[0-3])[:hH]([0-5]\d)\b/;
-  const m = re.exec(text);
-  return m ? `${pad2(Number(m[1]))}:${m[2]}` : null;
+  for (const line of allLines) {
+    const m = re.exec(line.text);
+    if (m) return { value: `${pad2(Number(m[1]))}:${m[2]}`, snippet: line.text, confidence: true };
+  }
+  return { value: null, snippet: null, confidence: false };
 }
 
 // ---------------------------------------------------------------------
-// Détection du prix
+// Prix — "24,00 €", "€ 24,00 EUR", "Total: 27,49 €"
 // ---------------------------------------------------------------------
-function detectPrice(text) {
-  // Cherche en priorité une ligne mentionnant "total" ; accepte le symbole
-  // € comme la mention "EUR".
-  const lines = text.split(/\n/);
-  const priceRe = /(\d{1,4}(?:[.,]\d{2})?)\s?(?:€|eur\b)|(?:€|eur\b)\s?(\d{1,4}(?:[.,]\d{2})?)/i;
+const PRICE_LABELS = /total|prix|montant|amount|price/i;
 
-  const totalLine = lines.find((l) => /total/i.test(l) && priceRe.test(l));
-  const source = totalLine || text;
-  const m = priceRe.exec(source);
+function extractPrice(text) {
+  const m = /(\d{1,4}[.,]\d{2})\s?(?:€|EUR)\b/i.exec(text) || /(?:€|EUR)\s?(\d{1,4}[.,]\d{2})/i.exec(text);
   if (!m) return null;
-  const raw = (m[1] || m[2]).replace(',', '.');
-  const value = parseFloat(raw);
-  return Number.isFinite(value) ? value : null;
+  const value = parseFloat(m[1].replace(',', '.'));
+  return Number.isFinite(value) ? { value, matchedText: m[0] } : null;
 }
 
-// ---------------------------------------------------------------------
-// Détection du lieu
-// ---------------------------------------------------------------------
-function detectPlace(text) {
-  const labelRe = /(?:lieu|venue|adresse|destination|départ|depart|arrivée|arrivee|de\s*→\s*à)\s*[:\-]\s*([^\n]{3,60})/gi;
-  // Un label "départ"/"arrivée" précède parfois une date/heure plutôt qu'un
-  // lieu (ex. "Départ : 28.08.2026 à 14h30") : on ignore ces candidats-là et
-  // on prend le premier qui ressemble vraiment à un nom de lieu.
-  let m;
-  while ((m = labelRe.exec(text))) {
-    const candidate = m[1].trim();
-    const looksLikeDateOrTime = /^\d{1,2}[.\/]\d{1,2}/.test(candidate);
-    if (candidate && !looksLikeDateOrTime) return candidate;
+function findPriceCandidates(allLines) {
+  let candidates = findLabeledCandidates(allLines, PRICE_LABELS, extractPrice, { searchNextLines: 1 });
+  if (candidates.length === 0) {
+    allLines.forEach((line) => {
+      const found = extractPrice(line.text);
+      if (found) candidates.push({ value: found.value, label: null, snippet: line.text, page: line.page, y: line.y });
+    });
   }
-  return '';
+  // Par défaut, un montant labellisé "sous-total"/"partiel" passe après
+  // les autres (Total, Prix, Montant...) — une règle apprise peut ensuite
+  // préférer un autre libellé pour un type de document donné.
+  const SUB_AMOUNT_RE = /sous|partiel|subtotal/i;
+  candidates.sort((a, b) => {
+    const aSub = a.label && SUB_AMOUNT_RE.test(a.label) ? 1 : 0;
+    const bSub = b.label && SUB_AMOUNT_RE.test(b.label) ? 1 : 0;
+    return aSub - bSub;
+  });
+  return candidates;
 }
 
 // ---------------------------------------------------------------------
-// Détection de l'adresse
+// Référence / numéro de commande
 // ---------------------------------------------------------------------
-/**
- * Cherche une ligne "code postal + ville" (ex. "75012 Paris", "1013 AK
- * Amsterdam") et la combine avec la ligne précédente si elle ressemble à un
- * nom de rue (contient un numéro). Best-effort : sert juste à pré-remplir
- * le champ adresse, toujours éditable ensuite.
- */
-function detectAddress(text) {
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-  const postalCityRe = /^\d{4,5}\s?[A-Z]{0,2}\s+[A-ZÀ-Ü][\p{L}'-]+/u;
-  const noisyLabelRe = /total|prix|price|r[ée]f[ée]rence|commande|r[ée]servation|confirmation|booking|billet|ticket/i;
+const REFERENCE_LABELS = /r[ée]f(?:[ée]rence)?|commande|r[ée]servation|order\s*(?:number|id)?|booking\s*(?:number|id)?|confirmation/i;
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!postalCityRe.test(line)) continue;
-    // Retire un éventuel libellé ("Adresse :", "Address:"...) au début de la
-    // ligne précédente avant de l'utiliser comme nom de rue.
-    const prev = (lines[i - 1] || '').replace(/^(?:adresse|address)\s*[:\-]\s*/i, '').trim();
-    const looksLikeStreet = /\d/.test(prev) && prev.length < 60 && !noisyLabelRe.test(prev) && !postalCityRe.test(prev);
-    return looksLikeStreet ? `${prev}, ${line}` : line;
-  }
-  return '';
+function extractReference(text) {
+  const m = /(?:[:#]|n°)\s*([A-Z0-9][A-Z0-9-]{3,19})\b/.exec(text);
+  if (!m) return null;
+  return { value: m[1], matchedText: m[0] };
+}
+
+function findReferenceCandidates(allLines) {
+  return findLabeledCandidates(allLines, REFERENCE_LABELS, extractReference, { searchNextLines: 1 });
 }
 
 // ---------------------------------------------------------------------
-// Détection de la référence / numéro de commande
+// Lieu
 // ---------------------------------------------------------------------
-function detectReference(text) {
-  // Le séparateur (:, # ou n°) est obligatoire entre le libellé et le code :
-  // sans ça, un mot du libellé lui-même ("commande", "booking"...) pourrait
-  // être capturé comme s'il était la référence.
-  const labelRe = /(?:r[ée]f(?:[ée]rence)?|commande|r[ée]servation|order\s*(?:number|id)?|booking\s*(?:number|id)?|confirmation)\s*(?:[:#]|n°)\s*([A-Z0-9-]{4,20})/gi;
-  const m = labelRe.exec(text);
-  return m ? m[1].trim() : '';
+const PLACE_LABELS = /lieu|venue|destination|d[ée]part|arriv[ée]e/i;
+
+function extractPlaceValue(text) {
+  const cleaned = text.replace(/^\s*[:\-]\s*/, '').trim();
+  if (!cleaned || cleaned.length > 60) return null;
+  if (/^\d{1,2}[.\/]\d{1,2}/.test(cleaned)) return null; // ressemble à une date, pas un lieu
+  return { value: cleaned, matchedText: cleaned };
+}
+
+function findPlaceCandidates(allLines) {
+  return findLabeledCandidates(allLines, PLACE_LABELS, extractPlaceValue, { searchNextLines: 0 });
+}
+
+// ---------------------------------------------------------------------
+// Adresse — ligne "code postal + ville" combinée à la ligne de rue au-dessus
+// ---------------------------------------------------------------------
+const POSTAL_CITY_RE = /^\d{4,5}\s?[A-Z]{0,2}\s+[A-ZÀ-Ü][\p{L}'-]+/u;
+const ADDRESS_NOISE_RE = /total|prix|price|r[ée]f[ée]rence|commande|r[ée]servation|confirmation|booking|billet|ticket/i;
+
+function findAddressCandidates(allLines) {
+  const candidates = [];
+  allLines.forEach((line, idx) => {
+    if (!POSTAL_CITY_RE.test(line.text)) return;
+    const prevRaw = allLines[idx - 1];
+    const prev = prevRaw && prevRaw.page === line.page ? prevRaw.text.replace(/^(?:adresse|address)\s*[:\-]\s*/i, '').trim() : '';
+    const looksLikeStreet = prev && /\d/.test(prev) && prev.length < 60 && !ADDRESS_NOISE_RE.test(prev) && !POSTAL_CITY_RE.test(prev);
+    const value = looksLikeStreet ? `${prev}, ${line.text}` : line.text;
+    candidates.push({ value, label: 'adresse', snippet: value, page: line.page, y: line.y });
+  });
+  return candidates;
 }
 
 // ---------------------------------------------------------------------
 // API principale
 // ---------------------------------------------------------------------
 
-/** Construit un titre par défaut lisible à partir du nom de fichier. */
 function titleFromFilename(name) {
   return name
     .replace(/\.pdf$/i, '')
@@ -224,45 +385,91 @@ function titleFromFilename(name) {
     .trim();
 }
 
+function emptyField() {
+  return { value: null, snippet: null, confidence: false };
+}
+
+function emptyAnalysis(file) {
+  return {
+    type: { value: 'event', snippet: null, confidence: false },
+    title: titleFromFilename(file.name),
+    startDate: emptyField(),
+    startTime: emptyField(),
+    endDate: emptyField(),
+    place: emptyField(),
+    address: emptyField(),
+    price: emptyField(),
+    reference: emptyField(),
+    docSignature: null,
+    candidates: {},
+  };
+}
+
 /**
  * Analyse un fichier PDF et retourne les champs détectés (pré-remplissage
- * du formulaire de confirmation). Ne lève pas d'exception sur un PDF
- * illisible : retourne des champs vides dans ce cas.
+ * du formulaire de confirmation), chacun avec sa valeur, son extrait
+ * source (`snippet`) et un booléen `confidence`. Ne lève pas d'exception
+ * sur un PDF illisible : retourne des champs vides dans ce cas.
  */
 async function analyzePdf(file) {
-  const base = {
-    type: 'event',
-    title: titleFromFilename(file.name),
-    startDate: null,
-    startTime: null,
-    endDate: null,
-    place: '',
-    address: '',
-    price: null,
-    reference: '',
-  };
+  const base = emptyAnalysis(file);
 
-  let text = '';
+  let pages;
   try {
-    text = await extractPdfText(file);
+    pages = await extractPdfLines(file);
   } catch (err) {
     console.warn('Lecture du PDF impossible, formulaire vide à compléter à la main.', err);
     return base;
   }
 
-  const dates = detectDates(text);
+  const allLines = pages.flatMap((p) => p.lines.map((l) => ({ ...l, page: p.pageIndex })));
+  if (allLines.length === 0) return base;
+
+  const text = allLines.map((l) => l.text).join('\n');
+  const docSignature = detectDocSignature(text);
+
+  const typeField = detectTypeField(allLines, text);
+  const { startDate, endDate } = detectDatesField(allLines);
+  const startTime = detectTimeField(allLines);
+
+  const priceCandidates = findPriceCandidates(allLines);
+  const referenceCandidates = findReferenceCandidates(allLines);
+  const addressCandidates = findAddressCandidates(allLines);
+  const placeCandidates = findPlaceCandidates(allLines);
+
+  let priceRule = null;
+  let referenceRule = null;
+  let addressRule = null;
+  let placeRule = null;
+  try {
+    [priceRule, referenceRule, addressRule, placeRule] = await Promise.all([
+      VoyagheureDB.getCorrectionRule(docSignature, 'price'),
+      VoyagheureDB.getCorrectionRule(docSignature, 'reference'),
+      VoyagheureDB.getCorrectionRule(docSignature, 'address'),
+      VoyagheureDB.getCorrectionRule(docSignature, 'place'),
+    ]);
+  } catch (err) {
+    // Pas bloquant : sans règles apprises, on garde l'heuristique par défaut.
+  }
 
   return {
-    type: detectType(text),
+    type: typeField,
     title: base.title,
-    startDate: dates[0] || null,
-    startTime: detectTime(text),
-    endDate: dates.length > 1 ? dates[dates.length - 1] : null,
-    place: detectPlace(text),
-    address: detectAddress(text),
-    price: detectPrice(text),
-    reference: detectReference(text),
+    startDate,
+    startTime,
+    endDate,
+    place: toField(chooseCandidate(placeCandidates, placeRule)),
+    address: toField(chooseCandidate(addressCandidates, addressRule)),
+    price: toField(chooseCandidate(priceCandidates, priceRule)),
+    reference: toField(chooseCandidate(referenceCandidates, referenceRule)),
+    docSignature,
+    candidates: {
+      price: priceCandidates,
+      reference: referenceCandidates,
+      address: addressCandidates,
+      place: placeCandidates,
+    },
   };
 }
 
-export const VoyagheureParser = { analyzePdf, extractPdfText, titleFromFilename };
+export const VoyagheureParser = { analyzePdf, titleFromFilename, emptyAnalysis };

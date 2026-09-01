@@ -19,10 +19,11 @@ sw.js                      Service Worker (cache l'app-shell + pdf.js pour
                             l'usage hors-ligne)
 css/style.css              Styles (mobile-first, ~380px, palette
                             aubergine/corail/rose, codes couleur par type)
-js/db.js                   IndexedDB : stores "trips" et "entries"
-js/parser.js                Extraction de texte PDF (pdf.js) + heuristiques
+js/db.js                   IndexedDB : stores "trips", "entries" et
+                            "correctionRules" (préférences apprises)
+js/parser.js                Extraction PDF positionnelle (pdf.js) + heuristiques
                             de détection (type, dates, heure, prix, lieu,
-                            référence)
+                            adresse, référence) avec confiance et apprentissage
 js/reminders.js               Rappels locaux (Notification API + Service
                             Worker) : réglages, permission, planification
 js/app.js                    Logique de l'app (navigation, formulaires, rendu)
@@ -62,32 +63,65 @@ donnée de planning/budget n'est stockée séparément.
 
 ## Import intelligent
 
-Import d'un ou plusieurs PDF → `js/parser.js` extrait le texte avec **pdf.js**
-(reconstruit les lignes à partir de la position des fragments de texte, pdf.js
-ne les fournit pas nativement) puis applique des heuristiques :
+Import d'un ou plusieurs PDF → `js/parser.js` reconstruit d'abord les
+**lignes de chaque page à partir de la position (x, y)** de chaque fragment
+de texte que fournit pdf.js (`item.transform`), triées dans l'ordre de
+lecture naturel — pas une simple concaténation en une seule chaîne. Un champ
+est associé à sa valeur par **proximité spatiale** : un libellé ("Départ",
+"Total", "Commande"...) puis sa valeur sur la même ligne, ou à défaut sur la
+ligne suivante (mises en page en tableau) — plutôt qu'un regex sur du texte
+plat où l'ordre peut être ambigu.
 
-- **Type** : mots-clés transport (FlixBus, SNCF, gare, aéroport, vol...),
-  hébergement (hostel, hôtel, Booking.com, Airbnb, check-in/out...), sinon
-  billet événement par défaut.
-- **Dates** : formats `JJ.MM.AAAA`, `JJ/MM/AAAA`, et dates en toutes lettres
-  (`28 août 2026`, mois abrégés). La première date trouvée devient la date de
-  début, la dernière (si différente) la date de fin.
+Heuristiques appliquées :
+
+- **Type** : score pondéré de mots-clés — transport (FlixBus, SNCF, gare,
+  aéroport, vol, Départ/Arrivée...), hébergement (Hostelworld, Booking.com,
+  Airbnb, check-in/out, Nuit...), événement (Portes/Doors, salle, billet,
+  concert...) — un mot-clé fort (nom de fournisseur) pèse plus qu'un mot-clé
+  faible (Départ/Arrivée, qui peut aussi apparaître sur une confirmation
+  d'hôtel), pour éviter les faux classements.
+- **Dates** : `JJ.MM.AAAA`, `JJ/MM/AAAA`, et en toutes lettres en français
+  et en anglais (`28 août 2026`, `28 August`, mois abrégés). La première
+  date trouvée devient la date de début, la dernière (si différente) la
+  date de fin.
 - **Heure** : formats `14:30` ou `14h30`.
-- **Prix** : motifs `XX,XX €` ou `XX EUR`, en priorité sur une ligne
-  contenant "total".
-- **Lieu** : recherche de libellés (lieu, adresse, départ, arrivée...) en
-  écartant les candidats qui ressemblent à une date plutôt qu'à un lieu.
-- **Adresse** : recherche une ligne « code postal + ville » (`75012 Paris`,
-  `1013 AK Amsterdam`...) et la combine avec la ligne précédente si elle
-  ressemble à un nom de rue.
-- **Référence** : recherche de libellés (référence, commande, réservation,
-  booking, confirmation...) suivis d'un code.
+- **Prix** : `24,00 €`, `€ 24,00`, `24,00 EUR`, en priorité sur une ligne
+  contenant "Total"/"Prix"/"Montant" — un montant labellisé
+  "sous-total"/"partiel" passe après les autres par défaut.
+- **Lieu** : libellés lieu/venue/destination/départ/arrivée, en écartant
+  les candidats qui ressemblent à une date plutôt qu'à un lieu.
+- **Adresse** : une ligne « code postal + ville » (`75012 Paris`,
+  `1013 AK Amsterdam`...) combinée à la ligne précédente si elle ressemble
+  à un nom de rue.
+- **Référence** : libellés référence/commande/réservation/booking/
+  confirmation suivis d'un code.
 
 Le formulaire de confirmation est **toujours** pré-rempli avec ces valeurs :
 l'utilisateur valide ou corrige, il ne saisit jamais un billet depuis zéro.
-Ces heuristiques sont un pré-remplissage, pas une garantie — un PDF scanné
-(image) ou une mise en page inhabituelle peut ne rien détecter ; le
-formulaire reste alors éditable normalement.
+
+### Confiance et texte source
+
+Sous chaque champ pré-rempli avec une détection fiable, un petit texte
+italique indique l'extrait source (« détecté depuis : « Total : 24,00 € » »).
+Un champ que l'import n'a pas pu détecter avec confiance **reste vide**
+plutôt que de deviner, et est signalé par une bordure corail + « ⚠️ à
+vérifier » à côté de son libellé — y compris **tous** les champs d'une
+image importée, puisqu'aucune extraction de texte n'y est faite (voir plus
+bas).
+
+### Mémorisation des corrections
+
+Quand plusieurs candidats existent pour un champ (ex. plusieurs montants —
+sous-total, taxes, total), chacun garde le libellé qui l'a introduit. Si
+l'utilisateur corrige le champ pré-rempli vers un **autre** candidat détecté
+sur le même document, Voyag'heure retient ce libellé comme préférence pour
+ce type de document (`js/db.js`, store `correctionRules`, clé = signature du
+document + nom du champ) et l'applique dès le prochain import du même type
+— avant l'heuristique par défaut. Signature de document : nom du
+fournisseur connu détecté (`flixbus`, `hostelworld`...) sinon le type
+détecté (`type:transport`, etc.). Pas de machine learning : une simple
+table `(document, champ) → libellé préféré`, mise à jour à chaque
+correction. Champs concernés : prix, référence, adresse, lieu.
 
 Le bouton **« Ajouter manuellement »** ouvre le même formulaire vide, pour
 les dépenses sans PDF ni photo (nourriture estimée, souvenirs...).
