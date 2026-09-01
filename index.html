@@ -37,7 +37,10 @@
       <div id="header-home">
         <div class="app-header__top">
           <h1 class="app-title">Voyag'heure</h1>
-          <span id="offline-badge-home" class="offline-badge" hidden>Hors-ligne</span>
+          <div class="app-header__actions">
+            <span id="offline-badge-home" class="offline-badge" hidden>Hors-ligne</span>
+            <button id="settings-btn" class="icon-btn" type="button" aria-label="Réglages">⚙️</button>
+          </div>
         </div>
         <p class="app-subtitle">Tes billets, où que tu ailles</p>
       </div>
@@ -205,7 +208,10 @@
           <label class="field"><span>Date de début</span><input type="date" id="entry-start-date" /></label>
           <label class="field"><span>Heure</span><input type="time" id="entry-start-time" /></label>
         </div>
-        <label class="field"><span>Date de fin (optionnelle)</span><input type="date" id="entry-end-date" /></label>
+        <div class="field-row">
+          <label class="field"><span>Date de fin (optionnelle)</span><input type="date" id="entry-end-date" /></label>
+          <label class="field"><span>Heure de fin</span><input type="time" id="entry-end-time" /></label>
+        </div>
         <label class="field"><span>Lieu</span><input type="text" id="entry-place" /></label>
         <label class="field"><span>Adresse</span><input type="text" id="entry-address" placeholder="Rue, ville, code postal" /></label>
         <div class="field-row">
@@ -220,10 +226,54 @@
             <option value="estimate">🎲 Estimé</option>
           </select>
         </label>
+        <label class="field">
+          <span>Rappel</span>
+          <select id="entry-reminder-mode">
+            <option value="default">Réglage par défaut</option>
+            <option value="custom">Délai personnalisé</option>
+            <option value="none">Aucun rappel</option>
+          </select>
+        </label>
+        <label class="field" id="entry-reminder-custom-field" hidden>
+          <span>Minutes avant l'événement</span>
+          <input type="number" min="0" step="5" id="entry-reminder-minutes" placeholder="30" />
+        </label>
         <div class="modal__actions modal__actions--wrap">
           <button type="button" class="btn btn--ghost" id="entry-view-pdf" hidden>Voir le PDF</button>
           <button type="button" class="btn btn--danger" id="entry-delete" hidden>Supprimer</button>
           <button type="button" class="btn btn--ghost" id="entry-cancel">Annuler</button>
+          <button type="submit" class="btn btn--primary">Enregistrer</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modale : réglages (rappels) -->
+  <div id="settings-modal" class="modal" hidden>
+    <div class="modal__sheet">
+      <h2 class="modal__title">Réglages</h2>
+      <p class="modal__hint">Reçois une notification avant chaque événement de tes plannings.</p>
+      <form id="settings-form">
+        <label class="field field--toggle">
+          <span>Activer les rappels</span>
+          <input type="checkbox" id="settings-reminders-enabled" />
+        </label>
+        <label class="field">
+          <span>Délai par défaut avant un événement (minutes)</span>
+          <input type="number" min="0" step="5" id="settings-default-minutes" />
+        </label>
+        <p id="settings-permission-hint" class="modal__hint" hidden></p>
+        <p id="settings-ios-hint" class="modal__hint" hidden>
+          📱 Sur iPhone/iPad : les rappels ne se déclenchent que pendant que
+          Voyag'heure reste ouverte au premier plan. iOS ne permet pas de
+          notifications programmées en arrière-plan sans serveur de
+          notifications push — cette app reste 100% locale, donc sans backend.
+        </p>
+        <p id="settings-unsupported-hint" class="modal__hint" hidden>
+          Les notifications ne sont pas prises en charge par ce navigateur.
+        </p>
+        <div class="modal__actions">
+          <button type="button" class="btn btn--ghost" id="settings-cancel">Fermer</button>
           <button type="submit" class="btn btn--primary">Enregistrer</button>
         </div>
       </form>

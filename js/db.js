@@ -140,6 +140,9 @@ async function createEntry(fields) {
     price: fields.price === '' || fields.price === undefined ? null : Number(fields.price),
     reference: fields.reference || '',
     paymentStatus: fields.paymentStatus || 'estimate',
+    // 'default' (utilise le réglage global) | 'custom' (voir reminderMinutes) | 'none'
+    reminderMode: fields.reminderMode || 'default',
+    reminderMinutes: fields.reminderMinutes === '' || fields.reminderMinutes === undefined || fields.reminderMinutes === null ? null : Number(fields.reminderMinutes),
     pdfBlob: fields.pdfBlob || null,
     pdfName: fields.pdfName || null,
     addedAt: Date.now(),
@@ -164,6 +167,16 @@ async function getEntriesForTrip(tripId) {
   const store = await tx(ENTRIES_STORE, 'readonly');
   return new Promise((resolve, reject) => {
     const req = store.index('tripId').getAll(tripId);
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/** Toutes les entrées, tous voyages confondus — utilisé pour planifier les rappels. */
+async function getAllEntries() {
+  const store = await tx(ENTRIES_STORE, 'readonly');
+  return new Promise((resolve, reject) => {
+    const req = store.getAll();
     req.onsuccess = () => resolve(req.result || []);
     req.onerror = () => reject(req.error);
   });
@@ -196,6 +209,7 @@ export const VoyagheureDB = {
   createEntry,
   updateEntry,
   getEntriesForTrip,
+  getAllEntries,
   getEntry,
   deleteEntry,
 };

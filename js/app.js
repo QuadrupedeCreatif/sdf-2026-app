@@ -1,5 +1,6 @@
 import { VoyagheureDB } from './db.js';
 import { VoyagheureParser } from './parser.js';
+import { VoyagheureReminders } from './reminders.js';
 
 (() => {
   'use strict';
@@ -85,6 +86,29 @@ import { VoyagheureParser } from './parser.js';
       ? `https://maps.apple.com/?q=${query}`
       : `https://www.google.com/maps/search/?api=1&query=${query}`;
     window.open(url, '_blank', 'noopener');
+  }
+
+  /** Comportement partagé Documents/Planning : ouvre le PDF/image d'origine
+   *  s'il y en a un (viewer natif du téléphone), sinon ouvre l'édition. */
+  function openEntryAttachmentOrEdit(entry) {
+    if (entry.pdfBlob) {
+      openBlobInNewTab(entry.pdfBlob, entry.pdfName || entry.title);
+    } else {
+      openEntryModal({ mode: 'edit', existingEntry: entry });
+    }
+  }
+
+  function timeToMinutes(hhmm) {
+    const [h, m] = hhmm.split(':').map(Number);
+    return h * 60 + m;
+  }
+
+  function formatDuration(minutes) {
+    const h = Math.floor(minutes / 60);
+    const m = minutes % 60;
+    if (h === 0) return `${m} min`;
+    if (m === 0) return `${h} h`;
+    return `${h} h ${m}`;
   }
 
   const TYPE_META = {
@@ -191,6 +215,7 @@ import { VoyagheureParser } from './parser.js';
         if (confirm(`Supprimer le voyage "${trip.name}" et toutes ses entrées ?`)) {
           await VoyagheureDB.deleteTrip(trip.id);
           renderHome();
+          VoyagheureReminders.rescheduleAll();
         }
       });
 
@@ -247,6 +272,7 @@ import { VoyagheureParser } from './parser.js';
     renderEntries(entries);
     renderPlanning(entries);
     renderBudget(entries);
+    VoyagheureReminders.rescheduleAll();
   }
 
   // ---------------------------------------------------------------------
@@ -278,13 +304,7 @@ import { VoyagheureParser } from './parser.js';
           <div class="doc-card__meta">${escapeHtml(metaBits.join(' · '))}</div>
         </span>
       `;
-      openBtn.addEventListener('click', () => {
-        if (entry.pdfBlob) {
-          openBlobInNewTab(entry.pdfBlob, entry.pdfName || entry.title);
-        } else {
-          openEntryModal({ mode: 'edit', existingEntry: entry });
-        }
-      });
+      openBtn.addEventListener('click', () => openEntryAttachmentOrEdit(entry));
 
       li.appendChild(openBtn);
 
@@ -420,11 +440,15 @@ import { VoyagheureParser } from './parser.js';
     $('#entry-start-date').value = data.startDate || '';
     $('#entry-start-time').value = data.startTime || '';
     $('#entry-end-date').value = data.endDate || '';
+    $('#entry-end-time').value = data.endTime || '';
     $('#entry-place').value = data.place || '';
     $('#entry-address').value = data.address || '';
     $('#entry-price').value = data.price === null || data.price === undefined ? '' : data.price;
     $('#entry-reference').value = data.reference || '';
     $('#entry-payment-status').value = data.paymentStatus || (isImport ? 'paid' : 'estimate');
+    $('#entry-reminder-mode').value = data.reminderMode || 'default';
+    $('#entry-reminder-minutes').value = data.reminderMinutes === null || data.reminderMinutes === undefined ? '' : data.reminderMinutes;
+    updateReminderCustomFieldVisibility();
 
     const blob = isEdit ? ctx.existingEntry.pdfBlob : isImport ? ctx.file : null;
     const viewBtn = $('#entry-view-pdf');
@@ -447,6 +471,11 @@ import { VoyagheureParser } from './parser.js';
     }
   }
 
+  function updateReminderCustomFieldVisibility() {
+    $('#entry-reminder-custom-field').hidden = $('#entry-reminder-mode').value !== 'custom';
+  }
+  $('#entry-reminder-mode').addEventListener('change', updateReminderCustomFieldVisibility);
+
   $('#entry-cancel').addEventListener('click', closeEntryModalAndContinueQueue);
 
   $('#entry-delete').addEventListener('click', async () => {
@@ -468,11 +497,14 @@ import { VoyagheureParser } from './parser.js';
       startDate: $('#entry-start-date').value || null,
       startTime: $('#entry-start-time').value || null,
       endDate: $('#entry-end-date').value || null,
+      endTime: $('#entry-end-time').value || null,
       place: $('#entry-place').value.trim(),
       address: $('#entry-address').value.trim(),
       price: $('#entry-price').value === '' ? null : Number($('#entry-price').value),
       reference: $('#entry-reference').value.trim(),
       paymentStatus: $('#entry-payment-status').value,
+      reminderMode: $('#entry-reminder-mode').value,
+      reminderMinutes: $('#entry-reminder-minutes').value === '' ? null : Number($('#entry-reminder-minutes').value),
     };
     if (!values.title) return;
 
@@ -523,10 +555,14 @@ import { VoyagheureParser } from './parser.js';
 
       const itemsEl = document.createElement('div');
       itemsEl.className = 'timeline-items';
-      items.forEach((entry) => {
+      items.forEach((entry, index) => {
         const meta = TYPE_META[entry.type] || TYPE_META.other;
         const wrap = document.createElement('div');
         wrap.className = `timeline-item type-${entry.type}`;
+
+        const timesLine = entry.startTime
+          ? `<p class="timeline-item__times">${entry.startTime}${entry.endTime ? `<span class="timeline-item__times-arrow">→</span>${entry.endTime}` : ''}</p>`
+          : '';
 
         const openBtn = document.createElement('button');
         openBtn.type = 'button';
@@ -534,12 +570,15 @@ import { VoyagheureParser } from './parser.js';
         openBtn.innerHTML = `
           <span class="timeline-item__icon" aria-hidden="true">${meta.icon}</span>
           <span>
-            <p class="timeline-item__type">${meta.label}${entry.startTime ? ` · ${entry.startTime}` : ''}</p>
+            <p class="timeline-item__type">${meta.label}</p>
+            ${timesLine}
             <p class="timeline-item__title">${escapeHtml(entry.title)}</p>
             ${entry.place ? `<p class="timeline-item__time">${escapeHtml(entry.place)}</p>` : ''}
           </span>
         `;
-        openBtn.addEventListener('click', () => openEntryModal({ mode: 'edit', existingEntry: entry }));
+        // Ouvre directement le PDF/l'image d'origine (viewer natif), sans
+        // changer d'onglet — ou l'édition s'il n'y a pas de pièce jointe.
+        openBtn.addEventListener('click', () => openEntryAttachmentOrEdit(entry));
         wrap.appendChild(openBtn);
 
         if (entry.address) {
@@ -555,7 +594,32 @@ import { VoyagheureParser } from './parser.js';
           wrap.appendChild(mapBtn);
         }
 
+        const editBtn = document.createElement('button');
+        editBtn.type = 'button';
+        editBtn.className = 'timeline-item__edit';
+        editBtn.setAttribute('aria-label', `Modifier ${entry.title}`);
+        editBtn.textContent = '✎';
+        editBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openEntryModal({ mode: 'edit', existingEntry: entry });
+        });
+        wrap.appendChild(editBtn);
+
         itemsEl.appendChild(wrap);
+
+        // Temps disponible avant la prochaine entrée du même jour (temps de
+        // trajet/battement) — seulement si les deux entrées ont une heure.
+        const next = items[index + 1];
+        if (next && entry.startTime && next.startTime) {
+          const endRef = entry.endTime || entry.startTime;
+          const gapMinutes = timeToMinutes(next.startTime) - timeToMinutes(endRef);
+          if (gapMinutes > 0) {
+            const gapEl = document.createElement('p');
+            gapEl.className = 'timeline-gap';
+            gapEl.innerHTML = `⏳ ${formatDuration(gapMinutes)} avant le prochain événement`;
+            itemsEl.appendChild(gapEl);
+          }
+        }
       });
       dayEl.appendChild(itemsEl);
       container.appendChild(dayEl);
@@ -619,6 +683,54 @@ import { VoyagheureParser } from './parser.js';
   }
 
   // ---------------------------------------------------------------------
+  // Réglages (rappels)
+  // ---------------------------------------------------------------------
+  function openSettingsModal() {
+    const settings = VoyagheureReminders.getSettings();
+    $('#settings-reminders-enabled').checked = settings.remindersEnabled;
+    $('#settings-default-minutes').value = settings.defaultMinutes;
+
+    const supported = VoyagheureReminders.notificationsSupported();
+    $('#settings-unsupported-hint').hidden = supported;
+    $('#settings-ios-hint').hidden = !VoyagheureReminders.isIOS();
+    $('#settings-permission-hint').hidden = true;
+    $('#settings-reminders-enabled').disabled = !supported;
+
+    showModal('#settings-modal');
+  }
+
+  $('#settings-btn').addEventListener('click', openSettingsModal);
+  $('#settings-cancel').addEventListener('click', () => hideModal('#settings-modal'));
+
+  $('#settings-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const wantsEnabled = $('#settings-reminders-enabled').checked;
+    const defaultMinutes = $('#settings-default-minutes').value === '' ? 30 : Number($('#settings-default-minutes').value);
+
+    let enabled = wantsEnabled;
+    if (wantsEnabled) {
+      // On ne demande la permission qu'au moment où l'utilisateur active la
+      // fonctionnalité — jamais au premier lancement de l'app.
+      const permission = await VoyagheureReminders.ensurePermission();
+      if (permission !== 'granted') {
+        enabled = false;
+        const hint = $('#settings-permission-hint');
+        hint.hidden = false;
+        hint.textContent =
+          permission === 'unsupported'
+            ? 'Les notifications ne sont pas prises en charge par ce navigateur.'
+            : 'Permission refusée — active les notifications pour Voyag’heure dans les réglages de ton navigateur pour utiliser les rappels.';
+        $('#settings-reminders-enabled').checked = false;
+        return; // laisse la modale ouverte pour que le message soit visible
+      }
+    }
+
+    VoyagheureReminders.saveSettings({ remindersEnabled: enabled, defaultMinutes });
+    hideModal('#settings-modal');
+    VoyagheureReminders.rescheduleAll();
+  });
+
+  // ---------------------------------------------------------------------
   // Statut hors-ligne
   // ---------------------------------------------------------------------
   function initOfflineBadge() {
@@ -678,6 +790,7 @@ import { VoyagheureParser } from './parser.js';
     initInstallPrompt();
     initServiceWorker();
     await renderHome();
+    VoyagheureReminders.rescheduleAll();
   }
 
   init();

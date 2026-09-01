@@ -23,6 +23,8 @@ js/db.js                   IndexedDB : stores "trips" et "entries"
 js/parser.js                Extraction de texte PDF (pdf.js) + heuristiques
                             de détection (type, dates, heure, prix, lieu,
                             référence)
+js/reminders.js               Rappels locaux (Notification API + Service
+                            Worker) : réglages, permission, planification
 js/app.js                    Logique de l'app (navigation, formulaires, rendu)
 vendor/pdfjs/                pdf.js (Mozilla), vendored pour fonctionner
                             hors-ligne sans dépendre d'un CDN
@@ -45,12 +47,14 @@ dépense ajoutée à la main) :
 | `type` | `transport` / `event` (billet événement) / `lodging` (hébergement) / `other` |
 | `title` | Titre affiché |
 | `startDate`, `startTime` | Date et heure de début (optionnelles) |
-| `endDate` | Date de fin (optionnelle, ex. check-out d'un hôtel) |
+| `endDate`, `endTime` | Date et heure de fin (optionnelles, ex. check-out d'un hôtel) |
 | `place` | Lieu (nom du venue/gare/hôtel) |
 | `address` | Adresse postale libre (rue, ville, code postal) — sert au bouton 📍 |
 | `price` | Montant en € (optionnel) |
 | `reference` | Référence / numéro de commande |
 | `paymentStatus` | `paid` (déjà payé) / `due` (à venir) / `estimate` (estimé) |
+| `reminderMode` | `default` (réglage global) / `custom` (voir `reminderMinutes`) / `none` |
+| `reminderMinutes` | Délai personnalisé en minutes, utilisé seulement si `reminderMode: 'custom'` |
 | `pdfBlob` | Le fichier original (`Blob`, PDF **ou image**), absent pour une entrée ajoutée à la main |
 
 Le Planning et le Budget sont **entièrement dérivés** de ces entrées : aucune
@@ -115,6 +119,56 @@ pré-remplie, sans carte intégrée ni clé API :
 
 Aucune adresse renseignée → le bouton n'apparaît pas.
 
+### Planning : ouverture directe, plage horaire, temps de battement
+
+Chaque élément du Planning est cliquable et ouvre **directement** le PDF/l'image
+d'origine (viewer natif, ou plein écran pour une image) sans passer par
+l'onglet Entrées — l'entrée sans pièce jointe ouvre l'édition à la place. Un
+bouton ✎ séparé permet aussi de modifier l'entrée directement.
+
+Quand une entrée a une heure de fin (`endTime`), les deux heures s'affichent
+en évidence (`18:00 → 19:30`). Entre deux entrées consécutives d'un même
+jour, si les deux ont une heure, le temps libre entre la fin de la première
+(ou son heure de début si pas d'heure de fin) et le début de la suivante est
+calculé et affiché (`⏳ 30 min avant le prochain événement`) — un simple
+calcul de différence, pas un itinéraire réel.
+
+### Rappels avant chaque événement
+
+Réglages accessibles via l'icône ⚙️ sur l'écran d'accueil : activer les
+rappels + délai par défaut (30 min par défaut, modifiable). Chaque entrée
+peut aussi avoir son propre réglage (`Réglage par défaut` / `Délai
+personnalisé` / `Aucun rappel`) dans son formulaire.
+
+La permission de notification n'est demandée **qu'au moment où tu actives
+les rappels** dans les réglages — jamais au premier lancement de l'app.
+
+**Comment ça marche techniquement** (`js/reminders.js`) : à chaque
+modification d'entrée, l'app recalcule tous les rappels à venir (tous
+voyages confondus) et programme un `setTimeout` par rappel ; à l'échéance,
+`ServiceWorkerRegistration.showNotification()` affiche la notification.
+
+**Limite technique importante — pas de rappels fiables app fermée sans
+backend.** Un vrai système de notifications programmées qui se déclenchent
+même app fermée nécessite le **Web Push API** : un serveur qui envoie la
+notification au bon moment via un service de push (VAPID). Voyag'heure est
+volontairement 100% locale, sans backend — donc :
+
+- **Android/Chrome** : fonctionne bien tant que Chrome tourne encore en
+  arrière-plan (app pas tuée depuis les apps récentes, téléphone pas
+  redémarré). Le `setTimeout` survit à un onglet en arrière-plan mais pas à
+  la fermeture du navigateur.
+- **iOS/Safari** : très limité. iOS suspend le processus de la PWA dès
+  qu'elle n'est plus au premier plan — le rappel ne se déclenche que si tu
+  as Voyag'heure ouverte à l'écran au moment voulu. C'est une limite d'iOS,
+  pas un bug : impossible à contourner sans serveur de push (ce qui
+  changerait l'architecture 100% locale de l'app). Un rappel indicatif à
+  cet effet s'affiche dans les réglages sur iOS.
+
+En pratique : utile comme pense-bête si tu gardes l'app ouverte (ou le
+téléphone déverrouillé dessus) à l'approche d'un événement, mais ne t'y fie
+pas pour un rappel qui doit sonner à coup sûr téléphone en poche.
+
 ## Développement local
 
 Aucune dépendance à installer pour faire tourner l'app. Il faut juste la
@@ -176,3 +230,9 @@ n'a plus de connexion, pour confirmer que le mode local fonctionne.
 - Chaque entrée peut être modifiée ou supprimée après coup (onglet Entrées,
   ou directement depuis une ligne du Planning/Budget).
 - Supprimer un voyage supprime aussi toutes ses entrées (et les PDF associés).
+- Largeur : `#app` remplit 100% de la largeur jusqu'à 560px (bien au-delà des
+  largeurs de viewport réelles d'un téléphone, y compris les Android réglés
+  sur un niveau de zoom d'affichage réduit, qui élargit le viewport CSS) ; le
+  rendu "carte centrée" avec ombre ne s'applique qu'à partir de 768px
+  (desktop). Avant ce correctif, un `max-width: 420px` trop strict pouvait
+  laisser des bandes vides sur certains Android.

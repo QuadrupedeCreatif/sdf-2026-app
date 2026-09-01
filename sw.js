@@ -4,7 +4,7 @@
  * ce SW garantit seulement que l'app elle-même (HTML/CSS/JS/pdf.js/icônes/
  * polices) s'ouvre sans connexion une fois installée.
  */
-const SHELL_CACHE = 'voyagheure-shell-v2';
+const SHELL_CACHE = 'voyagheure-shell-v3';
 const FONT_CACHE = 'voyagheure-fonts-v1';
 const CURRENT_CACHES = [SHELL_CACHE, FONT_CACHE];
 
@@ -14,6 +14,7 @@ const SHELL_FILES = [
   './css/style.css',
   './js/db.js',
   './js/parser.js',
+  './js/reminders.js',
   './js/app.js',
   './manifest.json',
   './vendor/pdfjs/pdf.min.mjs',
@@ -42,6 +43,21 @@ self.addEventListener('activate', (event) => {
       .keys()
       .then((names) => Promise.all(names.filter((n) => !CURRENT_CACHES.includes(n)).map((n) => caches.delete(n))))
       .then(() => self.clients.claim())
+  );
+});
+
+// Clic sur une notification de rappel : ramène l'app au premier plan
+// (réutilise un onglet déjà ouvert s'il y en a un) plutôt que d'en ouvrir un
+// nouveau à chaque fois.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientsList) => {
+      for (const client of clientsList) {
+        if ('focus' in client) return client.focus();
+      }
+      if (self.clients.openWindow) return self.clients.openWindow('./index.html');
+    })
   );
 });
 
