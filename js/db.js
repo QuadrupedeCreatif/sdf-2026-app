@@ -23,6 +23,9 @@
  *                        les documents FlixBus, préfère le prix labellisé
  *                        'Total'"). Une ligne par (signature de document,
  *                        champ) — pas de ML, juste une table de préférence.
+ *  - "checklistItems"  : la checklist d'un voyage (onglet dédié) — texte
+ *                        libre + coché/non coché, sans suggestion
+ *                        automatique de contenu.
  *
  * Rien de spécifique à un événement précis n'est codé ici : toutes les
  * données viennent de l'utilisateur, à la création du voyage ou à
@@ -30,11 +33,12 @@
  */
 
 const DB_NAME = 'voyagheure-db';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const TRIPS_STORE = 'trips';
 const ENTRIES_STORE = 'entries';
 const DOCUMENTS_STORE = 'documents';
 const CORRECTIONS_STORE = 'correctionRules';
+const CHECKLIST_STORE = 'checklistItems';
 
 let dbPromise = null;
 
@@ -62,6 +66,10 @@ function openDb() {
       }
       if (!db.objectStoreNames.contains(CORRECTIONS_STORE)) {
         db.createObjectStore(CORRECTIONS_STORE, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(CHECKLIST_STORE)) {
+        const store = db.createObjectStore(CHECKLIST_STORE, { keyPath: 'id' });
+        store.createIndex('tripId', 'tripId');
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -157,6 +165,19 @@ async function deleteTrip(id) {
     )
   );
 
+  const checklistItems = await getChecklistItemsForTrip(id);
+  const checklistStore = await tx(CHECKLIST_STORE, 'readwrite');
+  await Promise.all(
+    checklistItems.map(
+      (item) =>
+        new Promise((resolve, reject) => {
+          const req = checklistStore.delete(item.id);
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error);
+        })
+    )
+  );
+
   const tripStore = await tx(TRIPS_STORE, 'readwrite');
   return new Promise((resolve, reject) => {
     const req = tripStore.delete(id);
@@ -185,7 +206,15 @@ async function createEntry(fields) {
     endTime: fields.endTime || null,
     place: fields.place || '',
     address: fields.address || '',
-    price: fields.price === '' || fields.price === undefined ? null : Number(fields.price),
+    // Coordonnées GPS optionnelles (voir js/app.js "Définir la position") :
+    // utilisées pour affiner le bouton 📍 et estimer le temps de trajet à
+    // vol d'oiseau entre deux entrées consécutives du planning. Pas de
+    // géocodage automatique de l'adresse (nécessiterait un service en
+    // ligne) — l'utilisateur les capture lui-même via la géolocalisation
+    // du téléphone.
+    latitude: fields.latitude === '' || fields.latitude === undefined || fields.latitude === null ? null : Number(fields.latitude),
+    longitude: fields.longitude === '' || fields.longitude === undefined || fields.longitude === null ? null : Number(fields.longitude),
+    price: fields.price === '' || fields.price === undefined || fields.price === null ? null : Number(fields.price),
     reference: fields.reference || '',
     paymentStatus: fields.paymentStatus || 'estimate',
     // 'default' (utilise le réglage global) | 'custom' (voir reminderMinutes) | 'none'
@@ -267,7 +296,7 @@ async function createDocument(fields) {
     title: fields.title || 'Billet combiné',
     pdfBlob: fields.pdfBlob || null,
     pdfName: fields.pdfName || null,
-    price: fields.price === '' || fields.price === undefined ? null : Number(fields.price),
+    price: fields.price === '' || fields.price === undefined || fields.price === null ? null : Number(fields.price),
     reference: fields.reference || '',
     paymentStatus: fields.paymentStatus || 'estimate',
     addedAt: Date.now(),
@@ -372,6 +401,115 @@ async function saveCorrectionRule(docSignature, field, preferLabel) {
   });
 }
 
+// ---------------------------------------------------------------------
+// Checklist (par voyage — texte libre, coché/non coché, pas de suggestion
+// automatique de contenu)
+// ---------------------------------------------------------------------
+
+async function createChecklistItem({ tripId, text }) {
+  const store = await tx(CHECKLIST_STORE, 'readwrite');
+  const item = { id: makeId(), tripId, text: (text || '').trim(), checked: false, addedAt: Date.now() };
+  return new Promise((resolve, reject) => {
+    const req = store.add(item);
+    req.onsuccess = () => resolve(item);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function updateChecklistItem(item) {
+  const store = await tx(CHECKLIST_STORE, 'readwrite');
+  return new Promise((resolve, reject) => {
+    const req = store.put(item);
+    req.onsuccess = () => resolve(item);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function deleteChecklistItem(id) {
+  const store = await tx(CHECKLIST_STORE, 'readwrite');
+  return new Promise((resolve, reject) => {
+    const req = store.delete(id);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getChecklistItemsForTrip(tripId) {
+  const store = await tx(CHECKLIST_STORE, 'readonly');
+  return new Promise((resolve, reject) => {
+    const req = store.index('tripId').getAll(tripId);
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// ---------------------------------------------------------------------
+// Sauvegarde / restauration complète (export-import JSON — voir js/app.js)
+// ---------------------------------------------------------------------
+
+async function getAllDocuments() {
+  const store = await tx(DOCUMENTS_STORE, 'readonly');
+  return new Promise((resolve, reject) => {
+    const req = store.getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getAllChecklistItems() {
+  const store = await tx(CHECKLIST_STORE, 'readonly');
+  return new Promise((resolve, reject) => {
+    const req = store.getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function putRaw(storeName, record) {
+  return tx(storeName, 'readwrite').then(
+    (store) =>
+      new Promise((resolve, reject) => {
+        const req = store.put(record);
+        req.onsuccess = () => resolve(record);
+        req.onerror = () => reject(req.error);
+      })
+  );
+}
+
+// Réinsèrent un enregistrement TEL QUEL (id d'origine conservé) — utilisé
+// uniquement par la restauration d'une sauvegarde, pour préserver les
+// références croisées (entry.tripId, entry.documentId...) telles qu'elles
+// étaient au moment de l'export.
+function restoreTrip(trip) {
+  return putRaw(TRIPS_STORE, trip);
+}
+function restoreEntry(entry) {
+  return putRaw(ENTRIES_STORE, entry);
+}
+function restoreDocument(doc) {
+  return putRaw(DOCUMENTS_STORE, doc);
+}
+function restoreChecklistItem(item) {
+  return putRaw(CHECKLIST_STORE, item);
+}
+
+/**
+ * Vide entièrement voyages/entrées/documents/checklists — pas les règles
+ * de correction apprises, propres à cet appareil et sans rapport avec les
+ * données du voyageur. Utilisé avant de restaurer une sauvegarde en mode
+ * "remplacer" (voir js/app.js).
+ */
+async function clearAllData() {
+  for (const storeName of [TRIPS_STORE, ENTRIES_STORE, DOCUMENTS_STORE, CHECKLIST_STORE]) {
+    const store = await tx(storeName, 'readwrite');
+    await new Promise((resolve, reject) => {
+      const req = store.clear();
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  }
+}
+
 export const VoyagheureDB = {
   createTrip,
   updateTrip,
@@ -392,4 +530,15 @@ export const VoyagheureDB = {
   deleteDocument,
   getCorrectionRule,
   saveCorrectionRule,
+  createChecklistItem,
+  updateChecklistItem,
+  deleteChecklistItem,
+  getChecklistItemsForTrip,
+  getAllDocuments,
+  getAllChecklistItems,
+  restoreTrip,
+  restoreEntry,
+  restoreDocument,
+  restoreChecklistItem,
+  clearAllData,
 };

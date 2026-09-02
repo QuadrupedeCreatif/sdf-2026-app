@@ -111,9 +111,12 @@ import { VoyagheureReminders } from './reminders.js';
     return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
   }
 
-  /** Ouvre l'app de navigation du téléphone (Plans sur iOS, Google Maps sinon). */
-  function openInMaps(address) {
-    const query = encodeURIComponent(address);
+  /** Ouvre l'app de navigation du téléphone (Plans sur iOS, Google Maps
+   *  sinon). Préfère les coordonnées GPS (plus précises) si l'entrée en a
+   *  une (voir "Enregistrer ma position ici"), sinon utilise l'adresse texte. */
+  function openInMaps(entry) {
+    const hasCoords = entry.latitude != null && entry.longitude != null;
+    const query = hasCoords ? `${entry.latitude},${entry.longitude}` : encodeURIComponent(entry.address);
     const url = isIOSDevice()
       ? `https://maps.apple.com/?q=${query}`
       : `https://www.google.com/maps/search/?api=1&query=${query}`;
@@ -145,6 +148,52 @@ import { VoyagheureReminders } from './reminders.js';
     if (h === 0) return `${m} min`;
     if (m === 0) return `${h} h`;
     return `${h} h ${m}`;
+  }
+
+  function pad2(n) {
+    return String(n).padStart(2, '0');
+  }
+
+  /** Date du jour au format YYYY-MM-DD, en heure LOCALE (pas UTC) — pour
+   *  comparer à `entry.startDate` tel que saisi/détecté. */
+  function todayISO() {
+    const d = new Date();
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  }
+
+  // -----------------------------------------------------------------
+  // Distance à vol d'oiseau (Haversine) + estimation de temps de trajet
+  // -----------------------------------------------------------------
+  // Pas de calcul d'itinéraire routier réel (nécessiterait un service en
+  // ligne + clé API) : une estimation simple à partir de la distance
+  // directe entre deux points GPS, suffisante pour repérer un risque de
+  // retard sans rien casser du fonctionnement 100% hors-ligne.
+  function haversineKm(lat1, lon1, lat2, lon2) {
+    const R = 6371;
+    const toRad = (v) => (v * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a =
+      Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  const WALK_SPEED_KMH = 5;
+  const TRANSIT_SPEED_KMH = 25;
+  const TRANSIT_OVERHEAD_MIN = 10; // marche d'approche + attente
+  const WALK_THRESHOLD_KM = 2;
+
+  /** Mode de transport par défaut selon la distance : marche en dessous de
+   *  2 km, transport en commun au-delà (+ forfait fixe d'approche/attente). */
+  function estimateTravel(distanceKm) {
+    if (distanceKm <= WALK_THRESHOLD_KM) {
+      return { icon: '🚶', mode: 'walk', minutes: Math.max(1, Math.round((distanceKm / WALK_SPEED_KMH) * 60)) };
+    }
+    return {
+      icon: '🚇',
+      mode: 'transit',
+      minutes: Math.round((distanceKm / TRANSIT_SPEED_KMH) * 60) + TRANSIT_OVERHEAD_MIN,
+    };
   }
 
   // Champs pré-remplissables par l'import PDF, mappés vers l'id de leur
@@ -273,8 +322,12 @@ import { VoyagheureReminders } from './reminders.js';
     $('#trip-title').textContent = trip.name;
     const bits = [trip.place, [trip.startDate, trip.endDate].filter(Boolean).map(formatDateShort).join(' → ')].filter(Boolean);
     $('#trip-subtitle').textContent = bits.join(' · ');
-    switchTab('documents');
-    await refreshAll();
+    const entries = await refreshAll();
+    // Accès immédiat à la vue "Aujourd'hui" (Planning) si ce voyage a des
+    // entrées pour la date du jour, sans avoir à chercher dans le planning
+    // complet — sinon comportement inchangé (onglet Entrées par défaut).
+    const hasToday = (entries || []).some((e) => e.startDate === todayISO());
+    switchTab(hasToday ? 'planning' : 'documents');
   }
 
   // ---------------------------------------------------------------------
@@ -367,7 +420,7 @@ import { VoyagheureReminders } from './reminders.js';
   });
 
   async function refreshAll() {
-    if (!state.currentTrip) return;
+    if (!state.currentTrip) return [];
     const [entries, documents] = await Promise.all([
       VoyagheureDB.getEntriesForTrip(state.currentTrip.id),
       VoyagheureDB.getDocumentsForTrip(state.currentTrip.id),
@@ -376,7 +429,9 @@ import { VoyagheureReminders } from './reminders.js';
     renderEntries(entries);
     renderPlanning(entries);
     renderBudget(entries);
+    await renderChecklist();
     VoyagheureReminders.rescheduleAll();
+    return entries;
   }
 
   // ---------------------------------------------------------------------
@@ -442,9 +497,22 @@ import { VoyagheureReminders } from './reminders.js';
       mapBtn.textContent = '📍';
       mapBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        openInMaps(entry.address);
+        openInMaps(entry);
       });
       li.appendChild(mapBtn);
+    }
+
+    if (entry.pdfBlob) {
+      const scanBtn = document.createElement('button');
+      scanBtn.type = 'button';
+      scanBtn.className = 'doc-card__scan';
+      scanBtn.setAttribute('aria-label', 'Afficher pour scan');
+      scanBtn.textContent = '🔳';
+      scanBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openScanModal(entry.pdfBlob, entry.pdfName || entry.title);
+      });
+      li.appendChild(scanBtn);
     }
 
     const editBtn = document.createElement('button');
@@ -512,6 +580,19 @@ import { VoyagheureReminders } from './reminders.js';
     });
     li.appendChild(openBtn);
 
+    if (doc.pdfBlob) {
+      const scanBtn = document.createElement('button');
+      scanBtn.type = 'button';
+      scanBtn.className = 'doc-card__scan';
+      scanBtn.setAttribute('aria-label', 'Afficher pour scan');
+      scanBtn.textContent = '🔳';
+      scanBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openScanModal(doc.pdfBlob, doc.pdfName || doc.title);
+      });
+      li.appendChild(scanBtn);
+    }
+
     const editBtn = document.createElement('button');
     editBtn.type = 'button';
     editBtn.className = 'doc-card__edit';
@@ -539,6 +620,93 @@ import { VoyagheureReminders } from './reminders.js';
     li.appendChild(deleteBtn);
     list.appendChild(li);
   }
+
+  // ---------------------------------------------------------------------
+  // Plein écran "à scanner" (QR code / code-barres)
+  // ---------------------------------------------------------------------
+  // Aucune API web standard ne permet de forcer la luminosité de l'écran :
+  // on utilise le Wake Lock pour au moins empêcher la mise en veille
+  // pendant le scan, et on affiche une consigne explicite pour le reste.
+  let scanWakeLock = null;
+  let scanObjectUrl = null;
+
+  async function requestScanWakeLock() {
+    const hint = $('#scan-modal-hint');
+    if (!('wakeLock' in navigator)) {
+      hint.textContent =
+        '💡 Augmente la luminosité de ton écran à la main : ce navigateur ne permet pas de la forcer, ni d’empêcher la mise en veille automatiquement.';
+      return;
+    }
+    try {
+      scanWakeLock = await navigator.wakeLock.request('screen');
+      hint.textContent = '💡 Augmente la luminosité de ton écran à la main pour un scan optimal — elle ne peut pas être forcée automatiquement.';
+    } catch (err) {
+      scanWakeLock = null;
+      hint.textContent = '💡 Augmente la luminosité de ton écran à la main pour un scan optimal.';
+    }
+  }
+
+  async function releaseScanWakeLock() {
+    if (scanWakeLock) {
+      try {
+        await scanWakeLock.release();
+      } catch (err) {
+        // déjà relâché (ex. app passée en arrière-plan) — sans conséquence
+      }
+      scanWakeLock = null;
+    }
+  }
+
+  // Le Wake Lock est automatiquement relâché quand l'onglet passe en
+  // arrière-plan (ex. bascule d'app pour ouvrir le scanner) : on le
+  // redemande dès que l'app redevient visible, tant que la modale est ouverte.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && !$('#scan-modal').hidden && !scanWakeLock) {
+      requestScanWakeLock();
+    }
+  });
+
+  /** Affiche un PDF/image en plein écran, fond blanc, pour faciliter le
+   *  scan de son QR code/code-barres par un tiers. */
+  async function openScanModal(blob, name) {
+    // Demandé en tout premier, avant tout `await` intermédiaire : certains
+    // navigateurs exigent que l'appel reste rattaché au geste utilisateur
+    // (le clic) qui a déclenché cette fonction.
+    const wakeLockPromise = requestScanWakeLock();
+
+    const img = $('#scan-image');
+    if (scanObjectUrl) {
+      URL.revokeObjectURL(scanObjectUrl);
+      scanObjectUrl = null;
+    }
+
+    if (isImageBlob(blob)) {
+      scanObjectUrl = URL.createObjectURL(blob);
+      img.src = scanObjectUrl;
+    } else {
+      try {
+        img.src = await VoyagheureParser.renderFirstPageDataUrl(blob);
+      } catch (err) {
+        console.warn('Impossible de générer l’aperçu du PDF pour le scan', err);
+        alert("Impossible d'afficher ce document pour le scan.");
+        await releaseScanWakeLock();
+        return;
+      }
+    }
+
+    $('#scan-modal').hidden = false;
+    await wakeLockPromise;
+  }
+
+  $('#scan-close').addEventListener('click', async () => {
+    $('#scan-modal').hidden = true;
+    $('#scan-image').src = '';
+    if (scanObjectUrl) {
+      URL.revokeObjectURL(scanObjectUrl);
+      scanObjectUrl = null;
+    }
+    await releaseScanWakeLock();
+  });
 
   function isSupportedImportFile(f) {
     if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) return true;
@@ -612,6 +780,50 @@ import { VoyagheureReminders } from './reminders.js';
     }
   }
 
+  // Coordonnées GPS de l'entrée en cours d'édition/import — pas de champ
+  // visible dans le formulaire, juste capturées via la géolocalisation du
+  // téléphone (pas de géocodage automatique de l'adresse : nécessiterait
+  // un service en ligne, incompatible avec le fonctionnement 100%
+  // hors-ligne). Servent à affiner le bouton 📍 et à estimer le temps de
+  // trajet entre deux entrées consécutives du planning.
+  let pendingGps = { latitude: null, longitude: null };
+
+  function renderGpsStatus() {
+    const el = $('#entry-gps-status');
+    if (pendingGps.latitude != null && pendingGps.longitude != null) {
+      el.hidden = false;
+      el.textContent = `📍 Position enregistrée (${pendingGps.latitude.toFixed(5)}, ${pendingGps.longitude.toFixed(5)}) — retape le bouton pour la mettre à jour.`;
+    } else {
+      el.hidden = true;
+      el.textContent = '';
+    }
+  }
+
+  $('#entry-gps-btn').addEventListener('click', () => {
+    if (!('geolocation' in navigator)) {
+      alert("La géolocalisation n'est pas prise en charge par ce navigateur.");
+      return;
+    }
+    const btn = $('#entry-gps-btn');
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Localisation en cours…';
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        pendingGps = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+        renderGpsStatus();
+        btn.disabled = false;
+        btn.textContent = original;
+      },
+      () => {
+        btn.disabled = false;
+        btn.textContent = original;
+        alert("Impossible de récupérer ta position — vérifie que la géolocalisation est autorisée pour Voyag’heure.");
+      },
+      { enableHighAccuracy: true, timeout: 10_000 }
+    );
+  });
+
   function openEntryModal(ctx) {
     entryCtx = ctx;
     const isEdit = ctx.mode === 'edit';
@@ -670,6 +882,9 @@ import { VoyagheureReminders } from './reminders.js';
     $('#entry-reminder-mode').value = data.reminderMode || 'default';
     $('#entry-reminder-minutes').value = data.reminderMinutes === null || data.reminderMinutes === undefined ? '' : data.reminderMinutes;
     updateReminderCustomFieldVisibility();
+
+    pendingGps = { latitude: data.latitude ?? null, longitude: data.longitude ?? null };
+    renderGpsStatus();
 
     // Extraits sources + signalement des champs non détectés — seulement
     // pertinent juste après un import (PDF ou image).
@@ -759,6 +974,8 @@ import { VoyagheureReminders } from './reminders.js';
       endTime: $('#entry-end-time').value || null,
       place: $('#entry-place').value.trim(),
       address: $('#entry-address').value.trim(),
+      latitude: pendingGps.latitude,
+      longitude: pendingGps.longitude,
       reminderMode: $('#entry-reminder-mode').value,
       reminderMinutes: $('#entry-reminder-minutes').value === '' ? null : Number($('#entry-reminder-minutes').value),
     };
@@ -984,7 +1201,137 @@ import { VoyagheureReminders } from './reminders.js';
   // ---------------------------------------------------------------------
   // Onglet Planning
   // ---------------------------------------------------------------------
+  /**
+   * Construit la liste d'items d'un jour (ou de la vue "Aujourd'hui"),
+   * avec le battement/temps de trajet estimé entre deux entrées
+   * consécutives — factorisé pour être utilisé à la fois par le planning
+   * complet (jour par jour) et par la vue "Aujourd'hui" épinglée en haut.
+   */
+  function buildTimelineItemsEl(items) {
+    const itemsEl = document.createElement('div');
+    itemsEl.className = 'timeline-items';
+    items.forEach((entry, index) => {
+      const meta = TYPE_META[entry.type] || TYPE_META.other;
+      const wrap = document.createElement('div');
+      wrap.className = `timeline-item type-${entry.type}`;
+
+      const timesLine = entry.startTime
+        ? `<p class="timeline-item__times">${entry.startTime}${entry.endTime ? `<span class="timeline-item__times-arrow">→</span>${entry.endTime}` : ''}</p>`
+        : '';
+
+      const openBtn = document.createElement('button');
+      openBtn.type = 'button';
+      openBtn.className = 'timeline-item__open';
+      openBtn.innerHTML = `
+        <span class="timeline-item__icon" aria-hidden="true">${meta.icon}</span>
+        <span>
+          <p class="timeline-item__type">${meta.label}</p>
+          ${timesLine}
+          <p class="timeline-item__title">${escapeHtml(entry.title)}</p>
+          ${entry.place ? `<p class="timeline-item__time">${escapeHtml(entry.place)}</p>` : ''}
+        </span>
+      `;
+      // Ouvre directement le PDF/l'image d'origine (viewer natif), sans
+      // changer d'onglet — ou l'édition s'il n'y a pas de pièce jointe.
+      openBtn.addEventListener('click', () => openEntryAttachmentOrEdit(entry));
+      wrap.appendChild(openBtn);
+
+      if (entry.address) {
+        const mapBtn = document.createElement('button');
+        mapBtn.type = 'button';
+        mapBtn.className = 'timeline-item__map';
+        mapBtn.setAttribute('aria-label', `Itinéraire vers ${entry.address}`);
+        mapBtn.textContent = '📍';
+        mapBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openInMaps(entry);
+        });
+        wrap.appendChild(mapBtn);
+      }
+
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'timeline-item__edit';
+      editBtn.setAttribute('aria-label', `Modifier ${entry.title}`);
+      editBtn.textContent = '✎';
+      editBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openEntryModal({ mode: 'edit', existingEntry: entry });
+      });
+      wrap.appendChild(editBtn);
+
+      itemsEl.appendChild(wrap);
+
+      // Temps disponible avant la prochaine entrée du même jour. Si les
+      // deux entrées ont une position GPS (voir "Enregistrer ma position
+      // ici"), estime le temps de trajet à vol d'oiseau (Haversine) et
+      // affiche la marge restante — sinon garde le simple calcul d'écart
+      // horaire, pour rester compatible avec les entrées sans coordonnées.
+      const next = items[index + 1];
+      if (next && entry.startTime && next.startTime) {
+        const endRef = entry.endTime || entry.startTime;
+        const gapMinutes = timeToMinutes(next.startTime) - timeToMinutes(endRef);
+        if (gapMinutes > 0) {
+          const gapEl = document.createElement('div');
+          gapEl.className = 'timeline-gap';
+
+          const hasCoords = entry.latitude != null && entry.longitude != null && next.latitude != null && next.longitude != null;
+          if (hasCoords) {
+            const distanceKm = haversineKm(entry.latitude, entry.longitude, next.latitude, next.longitude);
+            const travel = estimateTravel(distanceKm);
+            const margin = gapMinutes - travel.minutes;
+            const atRisk = margin < 0;
+            if (atRisk) gapEl.classList.add('timeline-gap--alert');
+
+            const travelLabel =
+              travel.mode === 'walk'
+                ? `${travel.icon} ${formatDuration(travel.minutes)} de marche estimée`
+                : `${travel.icon} ~${formatDuration(travel.minutes)} en transport estimé`;
+            const marginLabel = atRisk
+              ? `⚠️ dépasse le temps disponible de ${formatDuration(-margin)} !`
+              : `${formatDuration(margin)} de marge`;
+
+            const line = document.createElement('p');
+            line.className = 'timeline-gap__line';
+            line.textContent = `${travelLabel} · ${marginLabel}`;
+            gapEl.appendChild(line);
+
+            const note = document.createElement('p');
+            note.className = 'timeline-gap__note';
+            note.textContent = "Estimation à vol d'oiseau (distance directe), pas un vrai calcul d'itinéraire — peut différer du trajet réel.";
+            gapEl.appendChild(note);
+          } else {
+            const line = document.createElement('p');
+            line.className = 'timeline-gap__line';
+            line.textContent = `⏳ ${formatDuration(gapMinutes)} avant le prochain événement`;
+            gapEl.appendChild(line);
+          }
+
+          itemsEl.appendChild(gapEl);
+        }
+      }
+    });
+    return itemsEl;
+  }
+
+  /** Vue "Aujourd'hui" épinglée en haut du Planning : uniquement les
+   *  entrées de la date calendaire du jour, triées par heure. */
+  function renderTodaySection(entries) {
+    const todayItems = entries
+      .filter((e) => e.startDate === todayISO())
+      .sort((a, b) => (a.startTime || '99:99').localeCompare(b.startTime || '99:99'));
+
+    const container = $('#today-items');
+    container.innerHTML = '';
+    $('#today-empty').hidden = todayItems.length > 0;
+    if (todayItems.length > 0) container.appendChild(buildTimelineItemsEl(todayItems));
+
+    return todayItems.length;
+  }
+
   function renderPlanning(entries) {
+    renderTodaySection(entries);
+
     const container = $('#planning-timeline');
     container.innerHTML = '';
 
@@ -1009,76 +1356,7 @@ import { VoyagheureReminders } from './reminders.js';
       labelEl.className = 'timeline-day__label';
       labelEl.textContent = label;
       dayEl.appendChild(labelEl);
-
-      const itemsEl = document.createElement('div');
-      itemsEl.className = 'timeline-items';
-      items.forEach((entry, index) => {
-        const meta = TYPE_META[entry.type] || TYPE_META.other;
-        const wrap = document.createElement('div');
-        wrap.className = `timeline-item type-${entry.type}`;
-
-        const timesLine = entry.startTime
-          ? `<p class="timeline-item__times">${entry.startTime}${entry.endTime ? `<span class="timeline-item__times-arrow">→</span>${entry.endTime}` : ''}</p>`
-          : '';
-
-        const openBtn = document.createElement('button');
-        openBtn.type = 'button';
-        openBtn.className = 'timeline-item__open';
-        openBtn.innerHTML = `
-          <span class="timeline-item__icon" aria-hidden="true">${meta.icon}</span>
-          <span>
-            <p class="timeline-item__type">${meta.label}</p>
-            ${timesLine}
-            <p class="timeline-item__title">${escapeHtml(entry.title)}</p>
-            ${entry.place ? `<p class="timeline-item__time">${escapeHtml(entry.place)}</p>` : ''}
-          </span>
-        `;
-        // Ouvre directement le PDF/l'image d'origine (viewer natif), sans
-        // changer d'onglet — ou l'édition s'il n'y a pas de pièce jointe.
-        openBtn.addEventListener('click', () => openEntryAttachmentOrEdit(entry));
-        wrap.appendChild(openBtn);
-
-        if (entry.address) {
-          const mapBtn = document.createElement('button');
-          mapBtn.type = 'button';
-          mapBtn.className = 'timeline-item__map';
-          mapBtn.setAttribute('aria-label', `Itinéraire vers ${entry.address}`);
-          mapBtn.textContent = '📍';
-          mapBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            openInMaps(entry.address);
-          });
-          wrap.appendChild(mapBtn);
-        }
-
-        const editBtn = document.createElement('button');
-        editBtn.type = 'button';
-        editBtn.className = 'timeline-item__edit';
-        editBtn.setAttribute('aria-label', `Modifier ${entry.title}`);
-        editBtn.textContent = '✎';
-        editBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          openEntryModal({ mode: 'edit', existingEntry: entry });
-        });
-        wrap.appendChild(editBtn);
-
-        itemsEl.appendChild(wrap);
-
-        // Temps disponible avant la prochaine entrée du même jour (temps de
-        // trajet/battement) — seulement si les deux entrées ont une heure.
-        const next = items[index + 1];
-        if (next && entry.startTime && next.startTime) {
-          const endRef = entry.endTime || entry.startTime;
-          const gapMinutes = timeToMinutes(next.startTime) - timeToMinutes(endRef);
-          if (gapMinutes > 0) {
-            const gapEl = document.createElement('p');
-            gapEl.className = 'timeline-gap';
-            gapEl.innerHTML = `⏳ ${formatDuration(gapMinutes)} avant le prochain événement`;
-            itemsEl.appendChild(gapEl);
-          }
-        }
-      });
-      dayEl.appendChild(itemsEl);
+      dayEl.appendChild(buildTimelineItemsEl(items));
       container.appendChild(dayEl);
     };
 
@@ -1173,6 +1451,63 @@ import { VoyagheureReminders } from './reminders.js';
   }
 
   // ---------------------------------------------------------------------
+  // Onglet Checklist (liste libre par voyage, aucun contenu suggéré)
+  // ---------------------------------------------------------------------
+  async function renderChecklist() {
+    if (!state.currentTrip) return;
+    const items = await VoyagheureDB.getChecklistItemsForTrip(state.currentTrip.id);
+    items.sort((a, b) => a.addedAt - b.addedAt);
+
+    const list = $('#checklist-list');
+    list.innerHTML = '';
+    $('#checklist-empty').hidden = items.length > 0;
+
+    items.forEach((item) => {
+      const li = document.createElement('li');
+      li.className = `checklist-item${item.checked ? ' is-checked' : ''}`;
+
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.className = 'checklist-item__checkbox';
+      checkbox.checked = item.checked;
+      checkbox.setAttribute('aria-label', `Marquer "${item.text}" comme fait`);
+      checkbox.addEventListener('change', async () => {
+        await VoyagheureDB.updateChecklistItem({ ...item, checked: checkbox.checked });
+        renderChecklist();
+      });
+
+      const text = document.createElement('span');
+      text.className = 'checklist-item__text';
+      text.textContent = item.text;
+
+      const deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.className = 'checklist-item__delete';
+      deleteBtn.setAttribute('aria-label', `Supprimer "${item.text}"`);
+      deleteBtn.textContent = '✕';
+      deleteBtn.addEventListener('click', async () => {
+        await VoyagheureDB.deleteChecklistItem(item.id);
+        renderChecklist();
+      });
+
+      li.appendChild(checkbox);
+      li.appendChild(text);
+      li.appendChild(deleteBtn);
+      list.appendChild(li);
+    });
+  }
+
+  $('#checklist-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const input = $('#checklist-input');
+    const text = input.value.trim();
+    if (!text || !state.currentTrip) return;
+    await VoyagheureDB.createChecklistItem({ tripId: state.currentTrip.id, text });
+    input.value = '';
+    renderChecklist();
+  });
+
+  // ---------------------------------------------------------------------
   // Réglages (rappels)
   // ---------------------------------------------------------------------
   function openSettingsModal() {
@@ -1218,6 +1553,160 @@ import { VoyagheureReminders } from './reminders.js';
     VoyagheureReminders.saveSettings({ remindersEnabled: enabled, defaultMinutes });
     hideModal('#settings-modal');
     VoyagheureReminders.rescheduleAll();
+  });
+
+  // ---------------------------------------------------------------------
+  // Sauvegarde / restauration complète (export-import JSON)
+  // ---------------------------------------------------------------------
+  function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  function base64ToBlob(base64, type) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type });
+  }
+
+  async function serializeBlobField(blob) {
+    if (!blob) return null;
+    return { data: await blobToBase64(blob), type: blob.type || 'application/octet-stream' };
+  }
+
+  function deserializeBlobField(field) {
+    if (!field) return null;
+    return base64ToBlob(field.data, field.type);
+  }
+
+  /** Construit l'objet exportable : tout ce qui vit en IndexedDB, PDF/images
+   *  encodés en base64 pour tenir dans du JSON. */
+  async function buildBackupData() {
+    const [trips, entries, documents, checklistItems] = await Promise.all([
+      VoyagheureDB.getAllTrips(),
+      VoyagheureDB.getAllEntries(),
+      VoyagheureDB.getAllDocuments(),
+      VoyagheureDB.getAllChecklistItems(),
+    ]);
+
+    const entriesOut = await Promise.all(
+      entries.map(async (e) => ({ ...e, pdfBlob: await serializeBlobField(e.pdfBlob) }))
+    );
+    const documentsOut = await Promise.all(
+      documents.map(async (d) => ({ ...d, pdfBlob: await serializeBlobField(d.pdfBlob) }))
+    );
+
+    return {
+      version: 1,
+      app: "Voyag'heure",
+      exportedAt: new Date().toISOString(),
+      trips,
+      entries: entriesOut,
+      documents: documentsOut,
+      checklistItems,
+    };
+  }
+
+  $('#backup-export-btn').addEventListener('click', async () => {
+    const btn = $('#backup-export-btn');
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Préparation…';
+    try {
+      const data = await buildBackupData();
+      const json = JSON.stringify(data, null, 2);
+      const filename = `voyagheure-sauvegarde-${new Date().toISOString().slice(0, 10)}.json`;
+      const file = new File([json], filename, { type: 'application/json' });
+
+      if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file], title: 'Sauvegarde Voyag’heure' });
+        } catch (err) {
+          if (err.name !== 'AbortError') throw err; // annulé par l'utilisateur : pas une erreur
+        }
+      } else {
+        const url = URL.createObjectURL(file);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      }
+    } catch (err) {
+      console.warn('Export impossible', err);
+      alert("L'export a échoué — réessaie.");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  });
+
+  $('#backup-import-btn').addEventListener('click', () => $('#backup-import-input').click());
+
+  $('#backup-import-input').addEventListener('change', async () => {
+    const file = $('#backup-import-input').files?.[0];
+    $('#backup-import-input').value = '';
+    if (!file) return;
+
+    let data;
+    try {
+      data = JSON.parse(await file.text());
+    } catch (err) {
+      alert('Ce fichier n’est pas une sauvegarde Voyag’heure valide (JSON illisible).');
+      return;
+    }
+    if (!data || !Array.isArray(data.trips)) {
+      alert('Ce fichier n’est pas une sauvegarde Voyag’heure valide.');
+      return;
+    }
+
+    const tripCount = data.trips.length;
+    if (!confirm(`Importer cette sauvegarde (${tripCount} voyage${tripCount > 1 ? 's' : ''}) ?`)) return;
+    const replace = confirm(
+      'Remplacer TOUTES tes données actuelles par cette sauvegarde ?\n\nOK = remplacer\nAnnuler = fusionner (garder aussi tes voyages actuels)'
+    );
+
+    const status = $('#backup-status');
+    status.hidden = false;
+    status.textContent = 'Import en cours…';
+
+    try {
+      if (replace) await VoyagheureDB.clearAllData();
+
+      for (const trip of data.trips || []) {
+        await VoyagheureDB.restoreTrip(trip);
+      }
+      for (const entry of data.entries || []) {
+        await VoyagheureDB.restoreEntry({ ...entry, pdfBlob: deserializeBlobField(entry.pdfBlob) });
+      }
+      for (const doc of data.documents || []) {
+        await VoyagheureDB.restoreDocument({ ...doc, pdfBlob: deserializeBlobField(doc.pdfBlob) });
+      }
+      for (const item of data.checklistItems || []) {
+        await VoyagheureDB.restoreChecklistItem(item);
+      }
+
+      status.textContent = 'Sauvegarde importée avec succès.';
+
+      if (state.currentTrip) {
+        // Le voyage courant peut avoir été supprimé/modifié par un
+        // remplacement : recharge sa vue si elle existe encore, sinon
+        // retourne à l'accueil plutôt que de laisser une vue obsolète.
+        const stillExists = await VoyagheureDB.getTrip(state.currentTrip.id);
+        if (stillExists) await refreshAll();
+        else await goHome();
+      } else {
+        await renderHome();
+      }
+    } catch (err) {
+      console.warn('Import de sauvegarde impossible', err);
+      status.textContent = "Échec de l'import — vérifie le fichier et réessaie.";
+    }
   });
 
   // ---------------------------------------------------------------------

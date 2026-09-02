@@ -416,6 +416,7 @@ body {
 }
 
 .doc-card__map,
+.doc-card__scan,
 .doc-card__edit,
 .doc-card__delete {
   flex: none;
@@ -426,6 +427,11 @@ body {
   font-size: 13px;
   line-height: 1;
   cursor: pointer;
+}
+
+.doc-card__scan {
+  background: rgba(242, 178, 90, 0.16);
+  color: var(--type-lodging);
 }
 
 /* Carte "billet combiné" (un PDF/QR partagé par plusieurs événements) :
@@ -622,12 +628,63 @@ body {
 /* Battement entre deux entrées consécutives d'une même journée */
 .timeline-gap {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  gap: 2px;
   margin-left: 14px;
-  padding: 2px 0 2px 14px;
+  padding: 4px 10px;
   font-size: 11.5px;
   color: rgba(251, 238, 228, 0.45);
+}
+
+.timeline-gap__line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Temps de trajet estimé (Haversine) supérieur au temps disponible avant
+   le prochain événement : risque de retard signalé visuellement. */
+.timeline-gap--alert {
+  border: 1px solid rgba(232, 93, 134, 0.4);
+  border-radius: 10px;
+  background: rgba(232, 93, 134, 0.1);
+  color: var(--rose);
+}
+
+.timeline-gap__note {
+  font-size: 10px;
+  font-style: italic;
+  color: rgba(251, 238, 228, 0.35);
+}
+
+/* Vue "Aujourd'hui" épinglée en haut du Planning */
+.today-section {
+  background: linear-gradient(135deg, rgba(242, 137, 90, 0.14), rgba(232, 93, 134, 0.08));
+  border: 1px solid rgba(242, 137, 90, 0.3);
+  border-radius: 18px;
+  padding: 14px;
+  margin-bottom: 20px;
+}
+
+.today-section__label {
+  font-family: var(--font-display);
+  font-size: 13px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--corail);
+  margin: 0 0 10px;
+}
+
+.today-items {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.today-empty {
+  margin: 0;
+  font-size: 13px;
+  color: rgba(251, 238, 228, 0.55);
 }
 
 /* ---------- Budget ---------- */
@@ -1020,6 +1077,166 @@ body {
   padding: 9px 12px;
   font-size: 13px;
   line-height: 1.4;
+}
+
+/* ---------- Checklist ---------- */
+.checklist-form {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.checklist-form input {
+  flex: 1;
+  font-family: var(--font-body);
+  font-size: 14.5px;
+  font-weight: 500;
+  color: var(--cream);
+  background: var(--aubergine-light);
+  border: 1px solid rgba(242, 137, 90, 0.25);
+  border-radius: 11px;
+  padding: 11px 12px;
+  min-width: 0;
+}
+
+.checklist-form .btn {
+  flex: none;
+  width: 46px;
+  padding: 0;
+}
+
+.checklist-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.checklist-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--aubergine-light);
+  border: 1px solid rgba(242, 137, 90, 0.15);
+  border-radius: 14px;
+  padding: 11px 12px;
+}
+
+.checklist-item__checkbox {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  accent-color: var(--corail);
+}
+
+.checklist-item__text {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 500;
+  word-break: break-word;
+}
+
+.checklist-item.is-checked .checklist-item__text {
+  text-decoration: line-through;
+  color: rgba(251, 238, 228, 0.4);
+}
+
+.checklist-item__delete {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(232, 93, 134, 0.12);
+  color: var(--rose);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* ---------- Position GPS (entrée) ---------- */
+.gps-row {
+  margin-bottom: 12px;
+}
+
+.gps-row__btn {
+  margin-bottom: 0;
+}
+
+/* ---------- Réglages : sauvegarde ---------- */
+.settings-divider {
+  border: none;
+  border-top: 1px solid rgba(242, 137, 90, 0.15);
+  margin: 18px 0;
+}
+
+.settings-subtitle {
+  font-family: var(--font-display);
+  font-size: 15px;
+  margin: 0 0 8px;
+  letter-spacing: 0.2px;
+}
+
+/* ---------- Plein écran "à scanner" (QR/code-barres) ---------- */
+.scan-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+}
+
+.scan-modal[hidden] {
+  display: none;
+}
+
+.scan-modal__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: calc(14px + var(--safe-top)) 16px 12px;
+  background: #ffffff;
+}
+
+.scan-modal__hint {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #6b6470;
+  flex: 1;
+}
+
+.scan-modal__close {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(28, 16, 32, 0.08);
+  color: var(--aubergine);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.scan-modal__body {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 20px calc(24px + var(--safe-bottom));
+  overflow: hidden;
+}
+
+.scan-modal__body img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
 }
 
 /* ---------- Scrollbar (léger, esthétique) ---------- */

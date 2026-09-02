@@ -795,4 +795,24 @@ async function analyzePdf(file) {
   };
 }
 
-export const VoyagheureParser = { analyzePdf, titleFromFilename, emptyAnalysis };
+/**
+ * Rend la première page d'un PDF en image (data URL PNG) — utilisé pour
+ * l'affichage plein écran "à scanner" d'un billet (voir js/app.js) : le
+ * PDF lui-même n'est pas affichable en plein écran de façon fiable dans
+ * une <img>/<canvas>, on en rend donc une image. Résolution assez haute
+ * pour qu'un QR code/code-barres reste net une fois agrandi à l'écran.
+ */
+async function renderFirstPageDataUrl(blob, { scale = 3 } = {}) {
+  const buffer = await blob.arrayBuffer();
+  const doc = await pdfjsLib.getDocument({ data: buffer }).promise;
+  const page = await doc.getPage(1);
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  const ctx = canvas.getContext('2d');
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  return canvas.toDataURL('image/png');
+}
+
+export const VoyagheureParser = { analyzePdf, titleFromFilename, emptyAnalysis, renderFirstPageDataUrl };

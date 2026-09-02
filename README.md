@@ -51,6 +51,7 @@ dépense ajoutée à la main) :
 | `endDate`, `endTime` | Date et heure de fin (optionnelles, ex. check-out d'un hôtel) |
 | `place` | Lieu (nom du venue/gare/hôtel) |
 | `address` | Adresse postale libre (rue, ville, code postal) — sert au bouton 📍 |
+| `latitude`, `longitude` | Coordonnées GPS optionnelles, capturées via « Enregistrer ma position ici » (pas de géocodage automatique) — affinent le bouton 📍 et l'estimation de trajet du Planning |
 | `price` | Montant en € (optionnel) — `null` si l'entrée fait partie d'un **billet combiné** (voir plus bas) |
 | `reference` | Référence / numéro de commande — idem, vide si billet combiné |
 | `paymentStatus` | `paid` / `due` / `estimate` — idem, sans effet si billet combiné |
@@ -72,12 +73,21 @@ les événements qu'il couvre :
 | `reference` | Référence / numéro de commande, partagée |
 | `paymentStatus` | `paid` / `due` / `estimate`, partagé |
 
+**`checklistItems`** — un élément de la checklist d'un voyage (onglet
+dédié) : `text` (libre), `checked` (coché/non coché). Aucune suggestion de
+contenu automatique — une liste vide que l'utilisateur remplit lui-même.
+
 Le Planning et le Budget sont **entièrement dérivés** de ces entrées (et
 documents) : aucune donnée de planning/budget n'est stockée séparément.
 
 ## Import intelligent
 
-Import d'un ou plusieurs PDF → `js/parser.js` reconstruit d'abord les
+Le bouton d'import accepte la **sélection de plusieurs fichiers à la
+fois** (PDF et/ou images mélangés) : chacun passe séquentiellement par le
+flux d'extraction/confirmation habituel — un formulaire de confirmation
+par fichier, à la suite, sans avoir à relancer l'import un par un.
+
+Pour chaque PDF → `js/parser.js` reconstruit d'abord les
 **lignes de chaque page à partir de la position (x, y)** de chaque fragment
 de texte que fournit pdf.js (`item.transform`), triées dans l'ordre de
 lecture naturel — pas une simple concaténation en une seule chaîne. Un champ
@@ -225,9 +235,32 @@ pré-remplie, sans carte intégrée ni clé API :
 - Android / autres → `google.com/maps/search` (ouvre Google Maps ou le
   navigateur si l'app n'est pas installée).
 
-Aucune adresse renseignée → le bouton n'apparaît pas.
+Aucune adresse renseignée → le bouton n'apparaît pas. Si l'entrée a en plus
+des **coordonnées GPS** (voir « Enregistrer ma position ici » ci-dessous),
+le lien utilise les coordonnées exactes plutôt que l'adresse texte, plus
+précis notamment pour un lieu sans adresse postale claire.
 
-### Planning : ouverture directe, plage horaire, temps de battement
+#### Coordonnées GPS — « Enregistrer ma position ici »
+
+Pas de géocodage automatique de l'adresse : ça demanderait un service en
+ligne (Nominatim, Google Geocoding...), incompatible avec le fonctionnement
+100% hors-ligne et sans clé API de l'app. À la place, le formulaire d'une
+entrée propose un bouton **« 📍 Enregistrer ma position ici »** qui capture
+la position GPS actuelle du téléphone (`navigator.geolocation`) — utile
+quand tu es sur place (ou que tu la retrouves via une autre app de plans) et
+que tu veux la mémoriser pour cette entrée. Optionnel : sans coordonnées,
+tout continue de fonctionner comme avant (adresse texte pour le bouton 📍,
+pas d'estimation de trajet — voir plus bas).
+
+### Planning : vue "Aujourd'hui", ouverture directe, plage horaire, trajet estimé
+
+**Vue "Aujourd'hui" épinglée** en haut de l'onglet Planning : uniquement les
+entrées dont la date correspond à la date calendaire du jour (comparée à
+l'horloge du téléphone), triées par heure — accès immédiat sans avoir à
+chercher dans le planning complet en dessous. Rien de prévu aujourd'hui →
+message « Rien de prévu aujourd'hui » à la place. Ouvrir un voyage qui a au
+moins une entrée aujourd'hui atterrit directement sur l'onglet Planning
+(sinon comportement inchangé : onglet Entrées par défaut).
 
 Chaque élément du Planning est cliquable et ouvre **directement** le PDF/l'image
 d'origine (viewer natif, ou plein écran pour une image) sans passer par
@@ -235,11 +268,37 @@ l'onglet Entrées — l'entrée sans pièce jointe ouvre l'édition à la place.
 bouton ✎ séparé permet aussi de modifier l'entrée directement.
 
 Quand une entrée a une heure de fin (`endTime`), les deux heures s'affichent
-en évidence (`18:00 → 19:30`). Entre deux entrées consécutives d'un même
-jour, si les deux ont une heure, le temps libre entre la fin de la première
-(ou son heure de début si pas d'heure de fin) et le début de la suivante est
-calculé et affiché (`⏳ 30 min avant le prochain événement`) — un simple
-calcul de différence, pas un itinéraire réel.
+en évidence (`18:00 → 19:30`).
+
+**Temps de trajet estimé entre deux entrées consécutives.** Si les deux ont
+des coordonnées GPS, la distance à vol d'oiseau entre les deux points est
+calculée (formule de Haversine) et convertie en temps de trajet estimé selon
+un mode par défaut : **à pied** en dessous de 2 km (5 km/h), **en transport
+en commun** au-delà (25 km/h + un forfait fixe de 10 min de marche
+d'approche/attente) — le mode utilisé est affiché à côté du temps
+(`🚶 12 min de marche estimée`, `🚇 ~35 min en transport estimé`), suivi de
+la marge restante une fois ce trajet effectué (`· 45 min de marge`). Si le
+trajet estimé dépasse le temps disponible, la carte est signalée
+visuellement (bordure rouge + ⚠️) comme risque de retard. Une mention
+discrète rappelle que c'est une estimation à vol d'oiseau, pas un vrai
+calcul d'itinéraire routier (aucune clé API, fonctionne hors-ligne).
+
+**Sans coordonnées GPS sur l'une des deux entrées** (le cas de la plupart
+des entrées existantes, ou de toute adresse jamais géolocalisée) → simple
+calcul de différence d'heures, comme avant (`⏳ 30 min avant le prochain
+événement`).
+
+### QR code / code-barres en plein écran — « Afficher pour scan »
+
+Toute carte de document avec un PDF/une image joint (Entrées, billet
+combiné) a un bouton **🔳 Afficher pour scan** : ouvre le document en plein
+écran sur fond blanc (rendu de la 1ère page en image pour un PDF, via
+pdf.js) pour faciliter la lecture du QR code/code-barres par un tiers
+(contrôleur, portique...). Un **Wake Lock** (`navigator.wakeLock`) est
+demandé pendant l'affichage pour empêcher la mise en veille de l'écran ;
+si le navigateur ne le supporte pas, ou pour la luminosité (qu'aucune API
+web standard ne permet de forcer), un message invite explicitement à
+l'augmenter à la main.
 
 ### Rappels avant chaque événement
 
@@ -276,6 +335,32 @@ volontairement 100% locale, sans backend — donc :
 En pratique : utile comme pense-bête si tu gardes l'app ouverte (ou le
 téléphone déverrouillé dessus) à l'approche d'un événement, mais ne t'y fie
 pas pour un rappel qui doit sonner à coup sûr téléphone en poche.
+
+## Checklist de voyage
+
+Onglet dédié par voyage, indépendant du Planning et des Entrées : une
+liste simple à cocher, texte libre, ajoutée/supprimée par l'utilisateur.
+Aucun contenu suggéré automatiquement — une liste vide au départ.
+
+## Sauvegarde — export / import
+
+Réglages (icône ⚙️ sur l'écran d'accueil) → **Exporter mes données** :
+génère un fichier JSON contenant l'intégralité des données stockées (tous
+les voyages, entrées, billets combinés et checklists — PDF et photos
+compris, encodés en base64) et propose son partage via l'**API Web Share**
+si le navigateur la supporte, sinon un téléchargement classique.
+
+**Importer une sauvegarde** accepte ce même format JSON et restaure les
+données, avec deux confirmations explicites avant toute écriture :
+d'abord confirmer l'import lui-même, puis choisir entre **remplacer**
+toutes les données actuelles ou **fusionner** (garder aussi les voyages
+déjà présents sur l'appareil — les identifiants d'origine de la sauvegarde
+sont conservés, donc réimporter deux fois la même sauvegarde en mode
+fusion ne duplique rien).
+
+Utile pour changer de téléphone, ou simplement garder une copie de
+sécurité — tout reste un fichier local, aucune donnée n'est envoyée à un
+serveur.
 
 ## Développement local
 
